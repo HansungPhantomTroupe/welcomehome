@@ -1,0 +1,19 @@
+{
+  "name": "welcome-home",
+  "private": true,
+  "workspaces": [
+    "server",
+    "web"
+  ],
+  "scripts": {
+    "dev": "concurrently -n api,web -c blue,green \"npm run dev -w server\" \"npm run dev -w web\"",
+    "data": "npm run data -w server",
+    "collect": "npm run collect -w server",
+    "build": "npm run build -w web",
+    "gen:grid": "npm run gen:grid -w server",
+    "build:features": "npm run build:features -w server"
+  },
+  "devDependencies": {
+    "concurrently": "^9.1.2"
+  }
+}

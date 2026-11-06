@@ -1,0 +1,12 @@
+node_modules/
+dist/
+.env
+data/cache/
+data/generated/
+*.log
+data/raw/living_pop_dong/
+# LG U+ 원본 데이터 (팀 제공, 대용량 · 외부 공유 금지) — 저장소에 넣지 않음
+/DATADNI*.csv
+/raw/
+# 공공데이터 다운로드 원본 (다시 받을 수 있음)
+data/raw/bus_stops/
