@@ -11,6 +11,7 @@ export default defineConfig({
     port: 5173,
     host: '0.0.0.0', // Tailscale 등 다른 기기에서 접속 가능하도록 모든 인터페이스에 바인딩
     allowedHosts: ['.ts.net', 'home.sgb.kr'], // Tailscale MagicDNS 이름(*.ts.net)과 개인 도메인으로 접속 허용
-    proxy: { '/api': 'http://localhost:4000' },
+    // xfwd: 원래 접속 주소를 서버에 넘김 (AI 는 이 컴퓨터에서 연 화면만 허용)
+    proxy: { '/api': { target: 'http://localhost:4000', xfwd: true } },
   },
 });

@@ -1,7 +1,7 @@
 import { useRef, useState } from 'react';
 import { newPoiCond, newPopCond, type Cond } from './classify';
 import CondBuilder, { NumPill, Pill, type ExplainCtx } from './CondBuilder';
-import { describe, type CellPred, type Dest, type FilterDef, type Names } from './filters';
+import { describe, paramValue, type CellPred, type CustomState, type Dest, type FilterDef, type Names } from './filters';
 
 interface Props {
   on: boolean;
@@ -26,6 +26,8 @@ interface Props {
   /** 선택한 구역이 각 조건을 통과하는지 (선택 없으면 null) */
   selChecks: boolean[] | null;
   selName: string;
+  /** 커스텀 조건 실행 상태 */
+  customState: (f: Extract<FilterDef, { type: 'custom' }>) => CustomState | undefined;
 }
 
 // ---------------------------------------------------------------- 저장한 조건 묶음
@@ -67,6 +69,7 @@ const TEMPLATES: { label: string; hint: string; make: (dest: Dest) => FilterDef 
 function kindLabel(f: FilterDef) {
   if (f.type === 'commute') return '이동 시간';
   if (f.type === 'dong') return '행정동';
+  if (f.type === 'custom') return `AI 조건 · ${f.script.name}`;
   if (f.pred.kind === 'category') return '동네 성격';
   const c = f.pred.cond;
   if (c.src === 'pop' && c.measure === 'share' && (c.ages.length < 6 || c.sexes.length < 2)) return '연령 · 성별 비율';
@@ -417,7 +420,34 @@ export default function FilterSection(p: Props) {
 }
 
 // ---------------------------------------------------------------- 조건 문장 (문장 안에서 바로 고침)
-function FilterSentence({ f, onChange, cats, dongs, destinations, x }: { f: FilterDef; onChange: (f: FilterDef) => void } & Props) {
+function FilterSentence({ f, onChange, cats, dongs, destinations, x, customState }: { f: FilterDef; onChange: (f: FilterDef) => void } & Props) {
+  if (f.type === 'custom') {
+    const st = customState(f);
+    return (
+      <div className="full custom-cond">
+        <div className="hint">{f.script.description}</div>
+        {f.script.params.map((pa) => {
+          const v = paramValue(f, pa.key);
+          const set = (nv: number | string | boolean) => onChange({ ...f, values: { ...f.values, [pa.key]: nv } });
+          return (
+            <div key={pa.key} className="cb-row">
+              <span className="cb-label wide">{pa.label}</span>
+              {pa.type === 'number' ? (
+                <NumPill value={Number(v)} min={pa.min ?? 0} step={pa.step ?? 1} onChange={(n) => set(pa.max !== undefined ? Math.min(pa.max, n) : n)} />
+              ) : pa.type === 'select' ? (
+                <Pill value={String(v)} options={(pa.options ?? []).map((o) => [o.value, o.label] as [string, string])} onChange={set} />
+              ) : (
+                <input type="checkbox" checked={!!v} onChange={(e) => set(e.target.checked)} />
+              )}
+              {pa.unit && <span>{pa.unit}</span>}
+            </div>
+          );
+        })}
+        {st?.status === 'loading' && <div className="near-count">계산 중…</div>}
+        {st?.status === 'error' && <pre className="ai-err">{st.error}</pre>}
+      </div>
+    );
+  }
   if (f.type === 'commute')
     return (
       <>

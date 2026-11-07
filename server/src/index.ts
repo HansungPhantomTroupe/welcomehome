@@ -3,6 +3,9 @@ import express from 'express';
 import cors from 'cors';
 import { FILES, KAKAO_REST_KEY, PORT } from './config';
 import { searchRect, stats, type Rect, type SearchSpec } from './kakao';
+import { runCustom, validateScript, type CustomScript, type RunResult } from './customFilter';
+import * as chatgpt from './chatgpt';
+import { chat } from './aiChat';
 import type { Cell, DongStat, Meta, Place } from '../../shared/types';
 
 const app = express();
@@ -78,10 +81,86 @@ app.get('/api/monthly-layer', async (req, res) => {
   res.json(out);
 });
 
+/**
+ * 커스텀 필터 실행 (격리된 JS 실행기)
+ * POST /api/custom/run  { script: { name, description, params, code }, values: { 입력칸: 값 } }
+ *  → { ok, pass: 칸ID[], values: { 칸ID: 숫자 }, ms, error? }
+ */
+const customCache = new Map<string, RunResult>();
+app.post('/api/custom/run', express.json({ limit: '200kb' }), async (req, res) => {
+  const d = await data();
+  if (!d) return res.status(503).json({ error: '데이터가 없습니다.' });
+  const script = req.body?.script as CustomScript;
+  const bad = validateScript(script);
+  if (bad) return res.status(400).json({ ok: false, error: bad });
+  const values = (req.body?.values ?? {}) as Record<string, unknown>;
+  const key = JSON.stringify([script.code, script.params, values]);
+  let r = customCache.get(key);
+  if (!r) {
+    r = await runCustom(d.cells, d.places, d.meta.cellSize, script, values);
+    if (customCache.size > 200) customCache.delete(customCache.keys().next().value!);
+    if (r.ok) customCache.set(key, r);
+  }
+  res.json(r);
+});
+
+// ---------- AI (Sign in with ChatGPT) ----------
+// 로그인 하나를 서버 전체가 같이 씀: 어느 기기에서 접속하든 같은 ChatGPT 계정으로 AI 사용. 토큰은 서버에만.
+const LOOPBACK = /^(127\.|::1$|::ffff:127\.)/;
+const ai = express.Router();
+ai.use(express.json({ limit: '300kb' }));
+ai.use((req, res, next) => {
+  res.locals.sid = 'shared';
+  // 서버를 켠 컴퓨터에서 연 화면인지 (Vite 프록시가 원래 주소를 x-forwarded-for 로 넘김)
+  const from = [req.socket.remoteAddress ?? '', ...String(req.headers['x-forwarded-for'] ?? '').split(',').map((x) => x.trim()).filter(Boolean)];
+  res.locals.local = from.every((a) => LOOPBACK.test(a));
+  next();
+});
+type H = (req: express.Request, res: express.Response, sid: string) => Promise<unknown>;
+const wrap = (fn: H) => (req: express.Request, res: express.Response) =>
+  fn(req, res, res.locals.sid).catch((e) => res.status(e.message?.includes('로그인') ? 401 : 502).json({ error: String(e.message ?? e) }));
+ai.get('/status', wrap(async (_req, res, sid) => res.json(await chatgpt.status(sid))));
+ai.post('/login', wrap(async (_req, res, sid) => res.json(await chatgpt.startLogin(sid, res.locals.local))));
+ai.post('/login/finish', wrap(async (req, res, sid) => {
+  await chatgpt.finishLogin(sid, String(req.body?.url ?? ''));
+  res.json(await chatgpt.status(sid));
+}));
+ai.post('/logout', wrap(async (_req, res, sid) => {
+  await chatgpt.logout(sid);
+  res.json(await chatgpt.status(sid));
+}));
+ai.get('/models', wrap(async (_req, res, sid) => res.json(await chatgpt.listModels(sid))));
+/** POST /api/ai/chat { model, history: [{role, content}], context: { stack, categories } } → { reply, plan?: { stack }, history } */
+ai.post('/chat', wrap(async (req, res, sid) => {
+  const d = await data();
+  if (!d) return res.status(503).json({ error: '데이터가 없습니다.' });
+  const model = String(req.body?.model ?? '');
+  const history = (Array.isArray(req.body?.history) ? req.body.history : [])
+    .filter((m: any) => (m?.role === 'user' || m?.role === 'assistant') && typeof m.content === 'string')
+    .map((m: any) => ({ role: m.role, content: m.content.slice(0, 20000) }));
+  if (!model || !history.length) return res.status(400).json({ error: 'model · history 가 필요해요.' });
+  const ctx = req.body?.context ?? {};
+  const cx = {
+    stack: (Array.isArray(ctx.stack) ? ctx.stack : []).slice(0, 40),
+    categories: (Array.isArray(ctx.categories) ? ctx.categories : []).slice(0, 30).map((c: any) => ({ id: String(c.id), label: String(c.label), desc: c.desc ? String(c.desc).slice(0, 200) : undefined })),
+  };
+  res.json(
+    await chat(sid, model, history, cx, {
+      cells: d.cells,
+      places: d.places,
+      size: d.meta.cellSize,
+      dongs: d.dongStats,
+      dests: (d.meta.destinations ?? []).map((x: { name: string }) => x.name),
+    }),
+  );
+}));
+app.use('/api/ai', ai);
+
 /** 데이터 재생성 후 메모리 캐시 비우기 */
 app.post('/api/reload', (_req, res) => {
   cache = null;
   monthlyCache = null;
+  customCache.clear();
   res.json({ ok: true });
 });
 

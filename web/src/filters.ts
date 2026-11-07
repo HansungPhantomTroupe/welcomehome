@@ -5,10 +5,12 @@
  *  - 구역 조건: 구역 안 지표(사람·가게 수) 또는 분류 종류
  *  - 이동 시간: 이 구역에서 고른 목적지까지 추정 시간
  *  - 행정동
+ *  - 커스텀(AI): 서버의 격리 실행기에서 돌린 스크립트 결과 (주변 칸을 보는 조건 등)
  */
 import type { Cell } from '@shared/types';
 import { estimateCommute } from '@shared/geo';
 import { condText, condUnit, type Cond, type MetricEval } from './classify';
+import type { CustomScript } from './customExamples';
 
 export type Dest = { name: string; lat: number; lng: number };
 export type CellPred = { kind: 'metric'; cond: Cond } | { kind: 'category'; ids: string[] };
@@ -17,7 +19,27 @@ interface Base {
   id: string;
   enabled: boolean;
 }
-export type FilterDef = (Base & { type: 'cell'; pred: CellPred }) | (Base & { type: 'commute'; maxMin: number; dest: Dest }) | (Base & { type: 'dong'; codes: string[] });
+export type ParamValue = number | string | boolean;
+export type FilterDef =
+  | (Base & { type: 'cell'; pred: CellPred })
+  | (Base & { type: 'commute'; maxMin: number; dest: Dest })
+  | (Base & { type: 'dong'; codes: string[] })
+  /** 커스텀: 스크립트는 숨기고 이름·입력칸만 보여 준다 */
+  | (Base & { type: 'custom'; script: CustomScript; values: Record<string, ParamValue> });
+
+// ---------------------------------------------------------------- 커스텀 실행 (서버)
+export type CustomState = { status: 'loading' } | { status: 'error'; error: string } | { status: 'ok'; pass: Set<string>; values: Record<string, number> };
+export const customKey = (script: CustomScript, values: Record<string, ParamValue>) => JSON.stringify([script.code, script.params, values]);
+export async function runCustomScript(script: CustomScript, values: Record<string, ParamValue>): Promise<CustomState> {
+  try {
+    const r = await fetch('/api/custom/run', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ script, values }) }).then((x) => x.json());
+    return r.ok ? { status: 'ok', pass: new Set(r.pass), values: r.values } : { status: 'error', error: r.error ?? '실행 실패' };
+  } catch (e: any) {
+    return { status: 'error', error: String(e.message ?? e) };
+  }
+}
+/** 입력칸 값 (없으면 기본값) */
+export const paramValue = (f: Extract<FilterDef, { type: 'custom' }>, key: string) => f.values[key] ?? f.script.params.find((p) => p.key === key)?.default;
 
 // ---------------------------------------------------------------- 설명
 export interface Names {
@@ -33,6 +55,14 @@ export function describe(f: FilterDef, n: Names): string {
       return f.codes.length ? `행정동 ${f.codes.map(n.dong).join(', ')}` : '행정동 (선택 없음)';
     case 'cell':
       return f.pred.kind === 'metric' ? condText(f.pred.cond) : f.pred.ids.length ? `동네 성격 ${f.pred.ids.map(n.cat).join('·')}` : '동네 성격 (선택 없음)';
+    case 'custom':
+      return `${f.script.name} · ${f.script.params
+        .map((p) => {
+          const v = paramValue(f, p.key);
+          const shown = p.type === 'select' ? p.options?.find((o) => o.value === v)?.label ?? v : p.type === 'boolean' ? (v ? '예' : '아니오') : v;
+          return `${p.label} ${shown}${p.unit ?? ''}`;
+        })
+        .join(' · ')}`;
   }
 }
 
@@ -40,6 +70,8 @@ export function describe(f: FilterDef, n: Names): string {
 export interface FilterCtx {
   me: MetricEval;
   catOf: (cellId: string) => string | null;
+  /** 커스텀 조건의 서버 실행 결과 (아직이면 undefined) */
+  custom?: (f: Extract<FilterDef, { type: 'custom' }>) => CustomState | undefined;
 }
 
 export function evalFilter(f: FilterDef, cell: Cell, ctx: FilterCtx): { ok: boolean; detail: string } {
@@ -50,6 +82,14 @@ export function evalFilter(f: FilterDef, cell: Cell, ctx: FilterCtx): { ok: bool
     }
     case 'dong':
       return { ok: f.codes.length === 0 || f.codes.includes(cell.dongCode), detail: cell.dongName };
+    case 'custom': {
+      // 계산 중이거나 스크립트 오류면 거르지 않는다 (행정동 '선택 전'과 같은 처리)
+      const st = ctx.custom?.(f);
+      if (!st || st.status === 'loading') return { ok: true, detail: '계산 중' };
+      if (st.status === 'error') return { ok: true, detail: '스크립트 오류' };
+      const v = st.values[cell.id];
+      return { ok: st.pass.has(cell.id), detail: v === undefined ? '' : String(Math.round(v * 10) / 10) };
+    }
     case 'cell': {
       const p = f.pred;
       if (p.kind === 'category') {

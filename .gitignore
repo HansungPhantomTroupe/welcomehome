@@ -10,3 +10,5 @@ data/raw/living_pop_dong/
 /raw/
 # 공공데이터 다운로드 원본 (다시 받을 수 있음)
 data/raw/bus_stops/
+# ChatGPT 로그인 토큰 (외부 공유 금지)
+data/auth/

@@ -12,7 +12,9 @@ import CategoriesSection from './CategoriesSection';
 import FilterSection from './FilterSection';
 import CellSection from './CellSection';
 import DebugRank from './DebugRank';
+import AiSection from './AiSection';
 import { layerKey, layerText, type ValueLayer } from './MonthlyPanel';
+import { customKey, runCustomScript, type CustomState } from './filters';
 import Tutorial, { type TourStep } from './Tutorial';
 
 interface Bootstrap {
@@ -123,7 +125,7 @@ function Explorer({ data, spread, setSpread }: { data: Bootstrap; spread: boolea
   const gridVisible = CELL_M / mPerPx >= GRID_MIN_PX;
   const [selectedId, selectCell] = useState<string | null>(null);
   // 패널 탭: 필터 · 종류 · 구역 — 구역을 골라도 탭은 그대로 (구역 탭에 표시만)
-  const [tab, setTab] = usePersisted<'filter' | 'type' | 'cell' | 'rank'>('wh.tab', () => 'filter');
+  const [tab, setTab] = usePersisted<'filter' | 'type' | 'cell' | 'rank' | 'ai'>('wh.tab', () => 'filter');
 
   // ---------- 공통 계산 ----------
   const idx = useMemo(() => makePlaceIndex(data.places), [data]);
@@ -185,7 +187,21 @@ function Explorer({ data, spread, setSpread }: { data: Bootstrap; spread: boolea
     if (pin !== null && pin > s.length) setPin(null);
     if (solo && !s.some((f) => f.id === solo)) setSolo(null);
   };
-  const fctx: FilterCtx = useMemo(() => ({ me, catOf: (id) => cls.byId.get(id)?.cat ?? null }), [me, cls]);
+  // 커스텀(AI) 조건: 스크립트·입력값이 바뀌면 서버에서 다시 계산
+  const [customRes, setCustomRes] = useState<Record<string, CustomState>>({});
+  useEffect(() => {
+    for (const f of stack) {
+      if (f.type !== 'custom') continue;
+      const k = customKey(f.script, f.values);
+      if (customRes[k]) continue;
+      setCustomRes((r) => ({ ...r, [k]: { status: 'loading' } }));
+      runCustomScript(f.script, f.values).then((st) => setCustomRes((r) => ({ ...r, [k]: st })));
+    }
+  }, [stack]);
+  const fctx: FilterCtx = useMemo(
+    () => ({ me, catOf: (id) => cls.byId.get(id)?.cat ?? null, custom: (f) => customRes[customKey(f.script, f.values)] }),
+    [me, cls, customRes],
+  );
   const run = useMemo(() => runFilters(stack, data.cells, fctx), [stack, data, fctx]);
   const pinIdx = pin === null ? stack.length : Math.min(pin, stack.length);
   const soloFilter = solo ? stack.find((f) => f.id === solo) ?? null : null;
@@ -434,6 +450,19 @@ function Explorer({ data, spread, setSpread }: { data: Bootstrap; spread: boolea
   );
   const newCat = cats.find((c) => !tourCatBase.current.has(c.id)) ?? null;
   const usesNewCat = !!newCat && stack.some((f) => f.type === 'cell' && f.pred.kind === 'category' && f.pred.ids.includes(newCat.id));
+  // 성격 색이 보이게: 칸이 그려지는 배율(약 2km 범위)로, 지금 화면 가운데에서 가장 가까운 칸을 중심으로
+  const showTypesArea = () => {
+    const mid = bounds ? { lat: (bounds.minLat + bounds.maxLat) / 2, lng: (bounds.minLng + bounds.maxLng) / 2 } : data.cells[0].center;
+    let best = data.cells[0];
+    let bd = Infinity;
+    for (const c of data.cells) {
+      const d = (c.center.lat - mid.lat) ** 2 + ((c.center.lng - mid.lng) * 0.8) ** 2;
+      if (d < bd) [best, bd] = [c, d];
+    }
+    const [dLat, dLng] = [0.009, 0.0113]; // 약 1km
+    const around = [-1, 1].flatMap((a) => [-1, 1].map((b) => ({ lat: best.center.lat + a * dLat, lng: best.center.lng + b * dLng })));
+    setFocus({ key: `tour-types-${best.id}`, points: around });
+  };
   const tourSteps: TourStep[] = [
     {
       title: '살 동네, 지도에서 같이 찾아봐요',
@@ -605,9 +634,14 @@ function Explorer({ data, spread, setSpread }: { data: Bootstrap; spread: boolea
     {
       target: '.switch-row',
       doneTarget: '.map-wrap:not(.detail)',
-      onEnter: () => setTab('type'),
+      onEnter: () => {
+        setTab('type');
+        // 조건 결과(노란 칸)가 켜져 있으면 성격 색이 가려지므로 잠깐 끈다 — '만든 성격으로 걸러 보기'에서 다시 켬
+        setFiltersOn(false);
+        showTypesArea();
+      },
       title: '지도에 색으로 보기',
-      body: <>만든 성격에 맞는 칸이 그 색으로 칠해져요.</>,
+      body: <>칸마다 동네 성격 색으로 칠해져요. 조건 결과는 잠깐 꺼 둘게요.</>,
       task: (
         <>
           <b>[지도에 색으로 보기]</b> 켜기 (키보드 <kbd>T</kbd>)
@@ -616,8 +650,25 @@ function Explorer({ data, spread, setSpread }: { data: Bootstrap; spread: boolea
       done: () => typesOn,
     },
     {
+      target: '.map-wrap:not(.detail)',
+      onEnter: () => {
+        setTypesOn(true);
+        setFiltersOn(false);
+        showTypesArea();
+      },
+      title: '동네 성격 지도',
+      body: (
+        <>
+          칸 색이 그 칸의 동네 성격이에요. <b>{newCat?.label ?? '방금 만든 성격'}</b> 칸도 보여요. 아래 범례에서 성격별로 끄고 켤 수 있어요.
+        </>
+      ),
+    },
+    {
       target: '.panel',
-      onEnter: () => setTab('filter'),
+      onEnter: () => {
+        setTab('filter');
+        setFiltersOn(true);
+      },
       title: '만든 성격으로 걸러 보기',
       body: <>동네 성격도 조건으로 쓸 수 있어요.</>,
       task: (
@@ -686,6 +737,9 @@ function Explorer({ data, spread, setSpread }: { data: Bootstrap; spread: boolea
           <button className={tab === 'cell' ? 'on' : ''} onClick={() => setTab('cell')}>
             고른 구역{selected && <span className="tab-dot" />}
           </button>
+          <button className={tab === 'ai' ? 'on' : ''} onClick={() => setTab('ai')}>
+            AI
+          </button>
           {/* [임시 · 디버깅] 값이 튀는 칸 찾기 */}
           <button className={tab === 'rank' ? 'on' : ''} onClick={() => setTab('rank')}>
             순위
@@ -713,6 +767,7 @@ function Explorer({ data, spread, setSpread }: { data: Bootstrap; spread: boolea
               names={names}
               selChecks={selected ? stack.map((f) => evalFilter(f, selected, fctx).ok) : null}
               selName={selected ? placeName.get(selected.id) ?? selected.dongName : ''}
+              customState={(f) => customRes[customKey(f.script, f.values)]}
             />
           )}
           {tab === 'type' && (
@@ -727,6 +782,35 @@ function Explorer({ data, spread, setSpread }: { data: Bootstrap; spread: boolea
               unclassified={unclassified}
               x={x}
               onReset={() => setCats(defaultCategories())}
+            />
+          )}
+          {tab === 'ai' && (
+            <AiSection
+              plan={{
+                stack,
+                cats,
+                dests: data.meta.destinations,
+                dongCodes: new Set(data.dongStats.map((d) => d.code)),
+                names,
+                evaluate: async (s) => {
+                  const res: Record<string, CustomState> = {};
+                  await Promise.all(
+                    s.map(async (f) => {
+                      if (f.type === 'custom' && f.enabled) res[customKey(f.script, f.values)] = await runCustomScript(f.script, f.values);
+                    }),
+                  );
+                  return runFilters(s, data.cells, { ...fctx, custom: (f) => res[customKey(f.script, f.values)] }).final.length;
+                },
+                apply: (s) => {
+                  setStack(s);
+                  setPin(null);
+                  setSolo(null);
+                },
+              }}
+              onAdd={(script) => {
+                setStack([...stack, { id: `f${Date.now().toString(36)}`, enabled: true, type: 'custom', script, values: {} }]);
+                setTab('filter');
+              }}
             />
           )}
           {tab === 'rank' && (
