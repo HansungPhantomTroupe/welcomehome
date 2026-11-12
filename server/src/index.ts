@@ -1,6 +1,7 @@
 import fs from 'node:fs/promises';
 import express from 'express';
 import cors from 'cors';
+import { pool, readDataset } from './postgres';
 import { FILES, KAKAO_REST_KEY, PORT } from './config';
 import { searchRect, stats, type Rect, type SearchSpec } from './kakao';
 import { runCustom, validateScript, type CustomScript, type RunResult } from './customFilter';
@@ -19,9 +20,11 @@ async function loadJson<T>(file: string): Promise<T | null> {
     return null;
   }
 }
-let cache: { cells: Cell[]; dongStats: DongStat[]; places: Place[]; meta: Meta } | null = null;
+type BootstrapData = { cells: Cell[]; dongStats: DongStat[]; places: Place[]; meta: Meta };
+let cache: BootstrapData | null = null;
 async function data() {
   if (cache) return cache;
+  if (pool) return (cache = await readDataset<BootstrapData>('bootstrap'));
   const [cells, dongStats, places, meta] = await Promise.all([
     loadJson<Cell[]>(FILES.cells),
     loadJson<DongStat[]>(FILES.dongStats),
@@ -35,20 +38,25 @@ async function data() {
 /** 분석에 필요한 데이터를 한 번에 내려준다 (셀 ~6,500개, 시설 ~2만 건 규모) */
 app.get('/api/bootstrap', async (_req, res) => {
   const d = await data();
-  if (!d) return res.status(503).json({ error: '데이터가 없습니다. 먼저 `npm run data` 를 실행하세요.' });
+  if (!d) return res.status(503).json({ error: '분석 데이터를 불러오지 못했습니다.' });
   // 데이터를 다시 만들면 바로 보이게: 매번 서버에 확인 (안 바뀌었으면 ETag 로 304, 다시 받지 않음)
   res.set('Cache-Control', 'no-cache');
   res.json(d);
 });
 
 /** 셀 하나의 월별 평균 인원 (LG U+ 원본 ÷ 일수 ÷ 시간 수): months × [요일 2][시간대 4][지표 6] */
-let monthlyCache: { months: string[]; cols: string[]; cells: Record<string, (number | null)[]> } | null = null;
+type MonthlyData = { months: string[]; cols: string[]; cells: Record<string, (number | null)[]> };
+let monthlyCache: MonthlyData | null = null;
+async function monthlyData() {
+  monthlyCache ??= pool ? await readDataset<MonthlyData>('monthly') : await loadJson<MonthlyData>(FILES.cellMonthly);
+  return monthlyCache;
+}
 app.get('/api/cell/:id/monthly', async (req, res) => {
-  monthlyCache ??= await loadJson(FILES.cellMonthly);
-  if (!monthlyCache) return res.status(503).json({ error: '월별 데이터가 없습니다. `npm run build:features` 를 실행하세요.' });
-  const v = monthlyCache.cells[req.params.id];
+  const monthly = await monthlyData();
+  if (!monthly) return res.status(503).json({ error: '월별 데이터를 불러오지 못했습니다.' });
+  const v = monthly.cells[req.params.id];
   if (!v) return res.status(404).json({ error: '없는 셀' });
-  res.json({ months: monthlyCache.months, cols: monthlyCache.cols, v });
+  res.json({ months: monthly.months, cols: monthly.cols, v });
 });
 
 /**
@@ -57,16 +65,16 @@ app.get('/api/cell/:id/monthly', async (req, res) => {
  *   cols: 지표 번호(0 체류 1 보행 2 주행 3 거주 4 직장 5 방문)를 더함, day·slot 은 그 값 또는 평균
  */
 app.get('/api/monthly-layer', async (req, res) => {
-  monthlyCache ??= await loadJson(FILES.cellMonthly);
-  if (!monthlyCache) return res.status(503).json({ error: '월별 데이터가 없습니다.' });
-  const m = monthlyCache.months.indexOf(String(req.query.month));
+  const monthly = await monthlyData();
+  if (!monthly) return res.status(503).json({ error: '월별 데이터가 없습니다.' });
+  const m = monthly.months.indexOf(String(req.query.month));
   const cols = String(req.query.cols ?? '').split(',').map(Number);
   const days = req.query.day === 'avg' ? [0, 1] : [Number(req.query.day)];
   const slots = req.query.slot === 'avg' ? [0, 1, 2, 3] : [Number(req.query.slot)];
   const bad = (xs: number[], n: number) => !xs.length || xs.some((x) => !Number.isInteger(x) || x < 0 || x >= n);
   if (m < 0 || bad(cols, 6) || bad(days, 2) || bad(slots, 4)) return res.status(400).json({ error: 'month · cols · day · slot 을 확인하세요.' });
   const out: Record<string, number | null> = {};
-  for (const [id, v] of Object.entries(monthlyCache.cells)) {
+  for (const [id, v] of Object.entries(monthly.cells)) {
     let sum = 0;
     let n = 0;
     for (const d of days)
