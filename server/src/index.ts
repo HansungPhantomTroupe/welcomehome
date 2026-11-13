@@ -1,16 +1,19 @@
 import fs from 'node:fs/promises';
 import express from 'express';
 import cors from 'cors';
-import { pool, readDataset } from './postgres';
+import compression from 'compression';
+import { pool, readBootstrap } from './postgres';
+import { attachNear } from './near';
 import { FILES, KAKAO_REST_KEY, PORT } from './config';
 import { searchRect, stats, type Rect, type SearchSpec } from './kakao';
 import { runCustom, validateScript, type CustomScript, type RunResult } from './customFilter';
 import * as chatgpt from './chatgpt';
 import { chat } from './aiChat';
-import type { Cell, DongStat, Meta, Place } from '../../shared/types';
+import type { Cell, DongStat, GeneratedCell, Meta, Place } from '../../shared/types';
 
 const app = express();
 app.use(cors());
+app.use(compression());
 
 // ---------- 정적 분석 데이터 (npm run data 결과) ----------
 async function loadJson<T>(file: string): Promise<T | null> {
@@ -20,73 +23,29 @@ async function loadJson<T>(file: string): Promise<T | null> {
     return null;
   }
 }
-type BootstrapData = { cells: Cell[]; dongStats: DongStat[]; places: Place[]; meta: Meta };
+type BootstrapData = { cells: Cell[]; dongStats: DongStat[]; meta: Meta };
 let cache: BootstrapData | null = null;
+/** DB(PostGIS)가 있으면 DB에서, 없으면 data/generated 파일로 같은 모양을 만든다. 시설 목록은 화면으로 보내지 않는다 */
 async function data() {
   if (cache) return cache;
-  if (pool) return (cache = await readDataset<BootstrapData>('bootstrap'));
+  if (pool) return (cache = await readBootstrap());
   const [cells, dongStats, places, meta] = await Promise.all([
-    loadJson<Cell[]>(FILES.cells),
+    loadJson<GeneratedCell[]>(FILES.cells),
     loadJson<DongStat[]>(FILES.dongStats),
     loadJson<Place[]>(FILES.places),
     loadJson<Meta>(FILES.meta),
   ]);
   if (!cells || !dongStats || !places || !meta) return null;
-  return (cache = { cells, dongStats, places, meta });
+  return (cache = { cells: attachNear(cells, places), dongStats, meta });
 }
 
-/** 분석에 필요한 데이터를 한 번에 내려준다 (셀 ~6,500개, 시설 ~2만 건 규모) */
+/** 분석에 필요한 데이터를 한 번에 내려준다 (칸 485개 + 행정동 + 메타) */
 app.get('/api/bootstrap', async (_req, res) => {
   const d = await data();
   if (!d) return res.status(503).json({ error: '분석 데이터를 불러오지 못했습니다.' });
   // 데이터를 다시 만들면 바로 보이게: 매번 서버에 확인 (안 바뀌었으면 ETag 로 304, 다시 받지 않음)
   res.set('Cache-Control', 'no-cache');
   res.json(d);
-});
-
-/** 셀 하나의 월별 평균 인원 (LG U+ 원본 ÷ 일수 ÷ 시간 수): months × [요일 2][시간대 4][지표 6] */
-type MonthlyData = { months: string[]; cols: string[]; cells: Record<string, (number | null)[]> };
-let monthlyCache: MonthlyData | null = null;
-async function monthlyData() {
-  monthlyCache ??= pool ? await readDataset<MonthlyData>('monthly') : await loadJson<MonthlyData>(FILES.cellMonthly);
-  return monthlyCache;
-}
-app.get('/api/cell/:id/monthly', async (req, res) => {
-  const monthly = await monthlyData();
-  if (!monthly) return res.status(503).json({ error: '월별 데이터를 불러오지 못했습니다.' });
-  const v = monthly.cells[req.params.id];
-  if (!v) return res.status(404).json({ error: '없는 셀' });
-  res.json({ months: monthly.months, cols: monthly.cols, v });
-});
-
-/**
- * 모든 셀의 월별 값 한 가지 (지도 위에 숫자로 쓰기용)
- * GET /api/monthly-layer?month=202501&cols=3,4,5&day=0|1|avg&slot=0~3|avg
- *   cols: 지표 번호(0 체류 1 보행 2 주행 3 거주 4 직장 5 방문)를 더함, day·slot 은 그 값 또는 평균
- */
-app.get('/api/monthly-layer', async (req, res) => {
-  const monthly = await monthlyData();
-  if (!monthly) return res.status(503).json({ error: '월별 데이터가 없습니다.' });
-  const m = monthly.months.indexOf(String(req.query.month));
-  const cols = String(req.query.cols ?? '').split(',').map(Number);
-  const days = req.query.day === 'avg' ? [0, 1] : [Number(req.query.day)];
-  const slots = req.query.slot === 'avg' ? [0, 1, 2, 3] : [Number(req.query.slot)];
-  const bad = (xs: number[], n: number) => !xs.length || xs.some((x) => !Number.isInteger(x) || x < 0 || x >= n);
-  if (m < 0 || bad(cols, 6) || bad(days, 2) || bad(slots, 4)) return res.status(400).json({ error: 'month · cols · day · slot 을 확인하세요.' });
-  const out: Record<string, number | null> = {};
-  for (const [id, v] of Object.entries(monthly.cells)) {
-    let sum = 0;
-    let n = 0;
-    for (const d of days)
-      for (const t of slots) {
-        const xs = cols.map((k) => v[((m * 2 + d) * 4 + t) * 6 + k]);
-        if (xs.some((x) => x === null)) continue;
-        sum += xs.reduce((s, x) => s! + x!, 0)!;
-        n++;
-      }
-    out[id] = n ? +(sum / n).toFixed(2) : null;
-  }
-  res.json(out);
 });
 
 /**
@@ -105,7 +64,7 @@ app.post('/api/custom/run', express.json({ limit: '200kb' }), async (req, res) =
   const key = JSON.stringify([script.code, script.params, values]);
   let r = customCache.get(key);
   if (!r) {
-    r = await runCustom(d.cells, d.places, d.meta.cellSize, script, values);
+    r = await runCustom(d.cells, d.meta.cellSize, script, values);
     if (customCache.size > 200) customCache.delete(customCache.keys().next().value!);
     if (r.ok) customCache.set(key, r);
   }
@@ -155,7 +114,6 @@ ai.post('/chat', wrap(async (req, res, sid) => {
   res.json(
     await chat(sid, model, history, cx, {
       cells: d.cells,
-      places: d.places,
       size: d.meta.cellSize,
       dongs: d.dongStats,
       dests: (d.meta.destinations ?? []).map((x: { name: string }) => x.name),
@@ -167,7 +125,6 @@ app.use('/api/ai', ai);
 /** 데이터 재생성 후 메모리 캐시 비우기 */
 app.post('/api/reload', (_req, res) => {
   cache = null;
-  monthlyCache = null;
   customCache.clear();
   res.json({ ok: true });
 });

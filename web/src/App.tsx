@@ -4,7 +4,6 @@ import type { Cell, DongStat, LatLng, Meta, Place } from '@shared/types';
 import { classifyAll, condSubject, condUnit, defaultCategories, makeMetricEval, type Category, type Cond } from './classify';
 import { describe, evalFilter, runFilters, type FilterCtx, type FilterDef, type Names } from './filters';
 import type { ExplainCtx } from './CondBuilder';
-import { attachNearDist, makePlaceIndex } from './placeIndex';
 import KakaoMap, { hasKakaoKey } from './map/KakaoMap';
 import SvgMap from './map/SvgMap';
 import type { Bounds, FitRequest, MapLayers, MapLine, MapPolygon } from './map/types';
@@ -13,18 +12,22 @@ import FilterSection from './FilterSection';
 import CellSection from './CellSection';
 import DebugRank from './DebugRank';
 import AiSection from './AiSection';
-import { layerKey, layerText, type ValueLayer } from './MonthlyPanel';
 import { customKey, runCustomScript, type CustomState } from './filters';
 import Tutorial, { type TourStep } from './Tutorial';
 
 interface Bootstrap {
   cells: Cell[];
-  places: Place[];
   dongStats: DongStat[];
   meta: Meta;
 }
 
 // ---------------------------------------------------------------- 저장 (브라우저별 편의 설정)
+/** 받침 있으면 '이에요', 없으면 '예요' */
+const eyo = (w: string) => {
+  const c = w.trim().charCodeAt(w.trim().length - 1) - 0xac00;
+  return c >= 0 && c < 11172 && c % 28 === 0 ? '예요' : '이에요';
+};
+
 function usePersisted<T>(key: string, init: () => T): [T, (v: T) => void] {
   const [v, setV] = useState<T>(() => {
     try {
@@ -68,7 +71,7 @@ export default function App() {
   useEffect(() => {
     fetch('/api/bootstrap')
       .then(async (r) => (r.ok ? r.json() : Promise.reject(new Error((await r.json()).error))))
-      .then((d) => setData(attachNearDist(d)))
+      .then((d) => setData(d))
       .catch((e) => setErr(e.message));
   }, []);
   if (err) return <div className="fatal">데이터를 불러오지 못했습니다: {err}</div>;
@@ -107,38 +110,22 @@ function Explorer({ data, spread, setSpread }: { data: Bootstrap; spread: boolea
   const [mapError, setMapError] = useState<string | null>(null);
   const [mPerPx, setMPerPx] = useState(20);
   const [bounds, setBounds] = useState<Bounds | null>(null);
-  // 고른 구역 표에서 누른 월별 값 — 지도 위 모든 칸에 숫자로
-  const [valueLayer, setValueLayer] = useState<ValueLayer | null>(null);
-  const [layerVals, setLayerVals] = useState<Record<string, number | null> | null>(null);
-  useEffect(() => {
-    if (!valueLayer) return setLayerVals(null);
-    const q = new URLSearchParams({ month: valueLayer.month, cols: valueLayer.cols.join(','), day: String(valueLayer.day), slot: String(valueLayer.slot) });
-    let alive = true;
-    fetch(`/api/monthly-layer?${q}`)
-      .then((r) => r.json())
-      .then((v) => alive && setLayerVals(v))
-      .catch(() => alive && setLayerVals(null));
-    return () => {
-      alive = false;
-    };
-  }, [valueLayer && layerKey(valueLayer)]);
   const gridVisible = CELL_M / mPerPx >= GRID_MIN_PX;
   const [selectedId, selectCell] = useState<string | null>(null);
   // 패널 탭: 필터 · 종류 · 구역 — 구역을 골라도 탭은 그대로 (구역 탭에 표시만)
   const [tab, setTab] = usePersisted<'filter' | 'type' | 'cell' | 'rank' | 'ai'>('wh.tab', () => 'filter');
 
   // ---------- 공통 계산 ----------
-  const idx = useMemo(() => makePlaceIndex(data.places), [data]);
   const me = useMemo(() => makeMetricEval(data.cells), [data]);
   // 구역을 사람이 아는 이름으로: 400m 안 지하철역이 있으면 "○○역 주변", 없으면 동 이름
   const placeName = useMemo(() => {
     const m = new Map<string, string>();
     for (const c of data.cells) {
-      const st = idx.nearest(c.center, 'subway');
-      m.set(c.id, st && st.dist <= 400 ? `${st.place.name.split(' ')[0]} 주변` : c.dongName);
+      const st = c.nearSubway;
+      m.set(c.id, st && st.m <= 400 ? `${st.name.split(' ')[0]} 주변` : c.dongName);
     }
     return m;
-  }, [data, idx]);
+  }, [data]);
   // 이 주변: 지도 화면 + 사방으로 30% 여유 (분포 표시용)
   const near = useMemo(() => {
     if (!bounds) return data.cells;
@@ -178,6 +165,18 @@ function Explorer({ data, spread, setSpread }: { data: Bootstrap; spread: boolea
 
   // ---------- 필터 (분류와 별개) ----------
   const [filtersOn, setFiltersOn] = usePersisted<boolean>('wh.filtersOn', () => true);
+  // 성격 색과 조건 결과는 동시에 켜지 않음 (켜면 다른 쪽이 꺼짐)
+  const showTypes = (v: boolean) => {
+    setTypesOn(v);
+    if (v) setFiltersOn(false);
+  };
+  const showFilters = (v: boolean) => {
+    setFiltersOn(v);
+    if (v) setTypesOn(false);
+  };
+  useEffect(() => {
+    if (typesOn && filtersOn) setTypesOn(false);
+  }, []);
   const [stack, setStackRaw] = usePersisted<FilterDef[]>('wh.filterStack.v7', () => []);
   // 핀: 위에서 몇 번째 조건까지 적용할지 (null = 끝까지) / 단독: 이 조건 하나만 적용
   const [pin, setPin] = useState<number | null>(null);
@@ -223,8 +222,8 @@ function Explorer({ data, spread, setSpread }: { data: Bootstrap; spread: boolea
       const tag = (e.target as HTMLElement)?.tagName;
       if (tag === 'INPUT' || tag === 'SELECT' || tag === 'TEXTAREA' || e.ctrlKey || e.metaKey || e.altKey) return;
       const k = e.key.toLowerCase();
-      if (k === 't' || k === 'ㅅ') setTypesOn(!keys.current.typesOn);
-      if (k === 'f' || k === 'ㄹ') setFiltersOn(!keys.current.filtersOn);
+      if (k === 't' || k === 'ㅅ') showTypes(!keys.current.typesOn);
+      if (k === 'f' || k === 'ㄹ') showFilters(!keys.current.filtersOn);
       if (e.key === 'Escape') selectCell(null);
     };
     window.addEventListener('keydown', onKey);
@@ -262,6 +261,8 @@ function Explorer({ data, spread, setSpread }: { data: Bootstrap; spread: boolea
   }, [heat, data, me, filterActive, stack, passList]);
 
   const allIds = useMemo(() => new Set(data.cells.map((c) => c.id)), [data]);
+  // 튜토리얼: 방금 만든 성격 칸을 테두리로 강조
+  const [hiCat, setHiCat] = useState<string | null>(null);
   const baseLayers: MapLayers = useMemo(() => {
     const polygons: MapPolygon[] = [];
     const lines: MapLine[] = [];
@@ -308,9 +309,12 @@ function Explorer({ data, spread, setSpread }: { data: Bootstrap; spread: boolea
       if (!gridVisible && !isSel && !passed) continue;
       const cat = catById.get(cls.byId.get(cell.id)?.cat ?? '');
       const colored = typesOn && cat && !hidden.has(cat.id);
+      const hi = !!hiCat && colored && cat.id === hiCat;
       let fill = '#000000';
       let fillOpacity = 0.01; // 보이지 않지만 클릭은 받도록
       if (colored) [fill, fillOpacity] = [tint(cat.color, 0.5), 0.9];
+      // 성격 하나를 짚을 때: 그 성격은 진하게, 나머지는 옅게 (테두리를 덧그리면 지도 전체가 탁해짐)
+      if (colored && hiCat) [fill, fillOpacity] = hi ? [cat.color, 0.75] : [fill, 0.25];
       if (filterActive) {
         // 맞는 구역은 노랗게 칠하고, 걸러진 구역은 살짝 눌러 둔다
         if (passed) [fill, fillOpacity] = [PASS, colored ? 0.75 : 0.6];
@@ -324,7 +328,7 @@ function Explorer({ data, spread, setSpread }: { data: Bootstrap; spread: boolea
         strokeOpacity: isSel ? 1 : passed ? 0 : 0.22,
         fill,
         fillOpacity,
-        zIndex: isSel ? 5 : passed ? 3 : 1,
+        zIndex: isSel ? 5 : hi ? 4 : passed ? 3 : 1,
         onClick: () => selectCell(isSel ? null : cell.id),
       });
     }
@@ -332,7 +336,7 @@ function Explorer({ data, spread, setSpread }: { data: Bootstrap; spread: boolea
     // 멀리서 볼 때: 격자가 숨어 있으니 탐색 지역 경계를 그어 '여기가 탐색 범위' 임을 보여준다
     if (!gridVisible) outline(allIds, data.cells, 2, '#475569', 0.7, 'sb');
     return { polygons, circles: [], lines, markers: [] };
-  }, [data, allIds, gridVisible, selectedId, typesOn, hidden, cls, catById, filterActive, pass, passList, heatInfo]);
+  }, [data, allIds, gridVisible, selectedId, typesOn, hidden, cls, catById, filterActive, pass, passList, heatInfo, hiCat]);
 
   // fitRun 이 바뀌면 처음 화면(탐색 지역 전체)으로 다시 맞춤 — 튜토리얼 시작 때
   const [fitRun, setFitRun] = useState(0);
@@ -341,25 +345,11 @@ function Explorer({ data, spread, setSpread }: { data: Bootstrap; spread: boolea
   // 튜토리얼 '칸 하나 = 50m × 50m' 단계: 고른 칸 테두리와 가로·세로 길이 표시
   const [tourStepId, setTourStepId] = useState<string | undefined>(undefined);
   const [tourCellId, setTourCellId] = useState<string | null>(null);
+  useEffect(() => {
+    if (tourStepId !== 'newCatMap') setHiCat(null);
+  }, [tourStepId]);
   const tourCell = tourStepId === 'cellSize' && tourCellId ? data.cells.find((c) => c.id === tourCellId) ?? null : null;
-  // 월별 값 숫자: 화면 안 칸만, 너무 많으면(멀리서 볼 때) 생략
-  const VALUE_MAX = 600;
-  const valueCells = useMemo(() => {
-    if (!layerVals || !bounds || !gridVisible) return null;
-    const inView = data.cells.filter((c) => c.center.lat >= bounds.minLat && c.center.lat <= bounds.maxLat && c.center.lng >= bounds.minLng && c.center.lng <= bounds.maxLng);
-    return inView.length > VALUE_MAX ? 'many' : inView;
-  }, [layerVals, bounds, gridVisible, data]);
-  const layersWithValues: MapLayers = useMemo(() => {
-    if (!layerVals || !Array.isArray(valueCells)) return baseLayers;
-    const fmtVal = (v: number) => (v >= 1000 ? Math.round(v).toLocaleString() : v >= 10 ? String(Math.round(v)) : v.toFixed(1));
-    const markers = valueCells.flatMap((c) => {
-      const v = layerVals[c.id];
-      return v === null || v === undefined ? [] : [{ id: `v-${c.id}`, pos: c.center, kind: 'value' as const, text: fmtVal(v), active: c.id === selectedId, onClick: () => selectCell(c.id) }];
-    });
-    return { ...baseLayers, markers: [...baseLayers.markers, ...markers] };
-  }, [baseLayers, layerVals, valueCells, selectedId]);
   const layers: MapLayers = useMemo(() => {
-    const baseLayers = layersWithValues;
     if (!tourCell) return baseLayers;
     const [sw, se, ne, nw] = tourCell.corners; // 남서 · 남동 · 북동 · 북서
     const mid = (a: LatLng, b: LatLng) => ({ lat: (a.lat + b.lat) / 2, lng: (a.lng + b.lng) / 2 });
@@ -389,7 +379,7 @@ function Explorer({ data, spread, setSpread }: { data: Bootstrap; spread: boolea
       lines: [...baseLayers.lines, edge('s', sw, se), edge('e', se, ne), edge('n', ne, nw), edge('w', nw, sw), ...w.lines, ...h.lines],
       markers: [...baseLayers.markers, w.label, h.label],
     };
-  }, [layersWithValues, tourCell]);
+  }, [baseLayers, tourCell]);
 
   const fit: FitRequest = useMemo(
     () => focus ?? { key: `init-${fitRun}`, points: data.cells.flatMap((x) => x.corners), allowCrop: 0.1 },
@@ -404,12 +394,28 @@ function Explorer({ data, spread, setSpread }: { data: Bootstrap; spread: boolea
   const [tourOpen, setTourOpen] = useState(false);
   // 튜토리얼은 누가 언제 켜든 같은 상태에서 시작: 조건 없음 · 선택 없음 · 색 끔 · 탐색 지역 전체 화면.
   // 쓰던 조건과 화면 설정은 잠깐 맡아 두었다가 튜토리얼을 닫으면 그대로 돌려놓는다 (튜토리얼에서 만든 조건은 연습용)
-  const tourBackup = useRef<{ stack: FilterDef[]; typesOn: boolean; filtersOn: boolean; tab: typeof tab; cats: Category[] } | null>(null);
+  type TourBackup = { stack: FilterDef[]; typesOn: boolean; filtersOn: boolean; tab: typeof tab; cats: Category[] };
+  // 도중에 새로고침해도 돌려놓을 수 있게 저장해 둔다
+  const TOUR_BACKUP_KEY = 'wh.tourBackup';
+  const storedBackup = (): TourBackup | null => {
+    try {
+      return JSON.parse(localStorage.getItem(TOUR_BACKUP_KEY) ?? 'null');
+    } catch {
+      return null;
+    }
+  };
+  const tourBackup = useRef<TourBackup | null>(storedBackup());
   // 튜토리얼 시작 때 있던 동네 성격 — 이것 말고 새로 생긴 게 '방금 만든 성격'
   const tourCatBase = useRef<Set<string>>(new Set());
   const startTour = () => {
     tourBackup.current ??= { stack, typesOn, filtersOn, tab, cats };
-    tourCatBase.current = new Set(cats.map((c) => c.id));
+    try {
+      localStorage.setItem(TOUR_BACKUP_KEY, JSON.stringify(tourBackup.current));
+    } catch {}
+    // 동네 성격도 기본 상태에서 시작 (쓰던 성격은 끝나면 돌려놓음)
+    const base = defaultCategories();
+    setCats(base);
+    tourCatBase.current = new Set(base.map((c) => c.id));
     setStackRaw([]);
     setPin(null);
     setSolo(null);
@@ -425,12 +431,15 @@ function Explorer({ data, spread, setSpread }: { data: Bootstrap; spread: boolea
   const endTour = () => {
     const b = tourBackup.current;
     tourBackup.current = null;
+    try {
+      localStorage.removeItem(TOUR_BACKUP_KEY);
+    } catch {}
     if (b) {
       setStackRaw(b.stack);
       setPin(null);
       setSolo(null);
       setHeat(null);
-      setTypesOn(b.typesOn);
+      setTypesOn(b.typesOn && !b.filtersOn);
       setFiltersOn(b.filtersOn);
       setTab(b.tab);
       setCats(b.cats);
@@ -440,6 +449,7 @@ function Explorer({ data, spread, setSpread }: { data: Bootstrap; spread: boolea
   };
   useEffect(() => {
     if (!tourDone) startTour(); // 처음 접속하면 자동으로
+    else if (tourBackup.current) endTour(); // 튜토리얼 도중 새로고침했으면 쓰던 상태로
   }, []);
   // 단계마다 '해 볼 것' 이 실제로 됐는지 지금 상태로 확인
   const popFilter = stack.find((f) => f.type === 'cell' && f.pred.kind === 'metric' && f.pred.cond.src === 'pop');
@@ -462,6 +472,20 @@ function Explorer({ data, spread, setSpread }: { data: Bootstrap; spread: boolea
     const [dLat, dLng] = [0.009, 0.0113]; // 약 1km
     const around = [-1, 1].flatMap((a) => [-1, 1].map((b) => ({ lat: best.center.lat + a * dLat, lng: best.center.lng + b * dLng })));
     setFocus({ key: `tour-types-${best.id}`, points: around });
+  };
+  // 이 성격 칸이 가장 많이 모인 약 2km 범위로
+  const showCatArea = (catId: string) => {
+    const mine = data.cells.filter((c) => cls.byId.get(c.id)?.cat === catId);
+    if (!mine.length) return showTypesArea();
+    const [dLat, dLng] = [0.009, 0.0113]; // 약 1km
+    let best = mine[0];
+    let bn = -1;
+    for (const c of mine) {
+      const n = mine.filter((o) => Math.abs(o.center.lat - c.center.lat) <= dLat && Math.abs(o.center.lng - c.center.lng) <= dLng).length;
+      if (n > bn) [best, bn] = [c, n];
+    }
+    const around = [-1, 1].flatMap((a) => [-1, 1].map((b) => ({ lat: best.center.lat + a * dLat, lng: best.center.lng + b * dLng })));
+    setFocus({ key: `tour-cat-${catId}-${best.id}`, points: around });
   };
   const tourSteps: TourStep[] = [
     {
@@ -583,8 +607,8 @@ function Explorer({ data, spread, setSpread }: { data: Bootstrap; spread: boolea
     {
       target: '.tabs button:nth-child(2)',
       doneTarget: '.panel',
-      title: '나만의 동네 성격',
-      body: <>조건을 묶어 동네 성격으로 만들 수 있어요.</>,
+      title: '동네 성격',
+      body: <>칸마다 사람 수와 가게 구성으로 동네 성격을 붙여 두었어요.</>,
       task: (
         <>
           <b>[동네 성격]</b> 탭 누르기
@@ -593,11 +617,38 @@ function Explorer({ data, spread, setSpread }: { data: Bootstrap; spread: boolea
       done: () => tab === 'type',
     },
     {
+      target: '.panel',
+      onEnter: () => setTab('type'),
+      title: '성격 목록',
+      body: <>성격마다 색과 조건이 있어요. 위에서부터 먼저 맞는 성격이 그 칸의 성격이 돼요.</>,
+    },
+    {
+      target: '.map-toggles [data-tour="types"]',
+      doneTarget: '.map-wrap:not(.detail)',
+      onEnter: () => {
+        setTab('type');
+        showTypesArea(); // 칸이 보이는 배율이어야 [동네 성격] 버튼이 나옴
+      },
+      title: '지도에 칠해 보기',
+      body: <>켜면 조건 결과는 꺼지고 칸이 성격 색으로 칠해져요.</>,
+      task: (
+        <>
+          지도 위 <b>[동네 성격]</b> 켜기 (키보드 <kbd>T</kbd>)
+        </>
+      ),
+      done: () => typesOn,
+    },
+    {
+      target: '.map-wrap:not(.detail)',
+      title: '동네 성격 지도',
+      body: <>칸 색이 그 칸의 동네 성격이에요. 범례에서 성격별로 끄고 켤 수 있어요.</>,
+    },
+    {
       target: '.add-big',
       doneTarget: '.cat.open',
       onEnter: () => setTab('type'),
       title: '새 성격 만들기',
-      body: <>성격마다 이름, 색, 조건을 정해요.</>,
+      body: <>성격은 직접 만들 수 있어요. 이름, 색, 조건을 정해요.</>,
       task: (
         <>
           <b>[+ 새 성격 만들기]</b> 누르기
@@ -609,66 +660,73 @@ function Explorer({ data, spread, setSpread }: { data: Bootstrap; spread: boolea
       target: '.cat.open',
       onEnter: () => setTab('type'),
       title: '이름 정하기',
-      body: <>예시로 ‘조용한 밤 동네’를 만들어 볼게요.</>,
+      body: <>예시로 ‘카페 많은 동네’를 만들어 볼게요.</>,
       task: (
         <>
-          이름을 <b>조용한 밤 동네</b>로 바꾸기
+          이름을 <b>카페 많은 동네</b>로 바꾸기
         </>
       ),
-      done: () => !!newCat && newCat.label.replace(/\s/g, '') === '조용한밤동네',
+      done: () => !!newCat && newCat.label.replace(/\s/g, '') === '카페많은동네',
     },
     {
-      target: '.cat.open .cb',
+      target: '.cat.open',
       onEnter: () => setTab('type'),
       title: '조건 정하기',
-      body: <>이 조건에 맞는 칸이 ‘조용한 밤 동네’가 돼요.</>,
+      body: <>조건을 모두 만족하는 칸이 ‘카페 많은 동네’가 돼요.</>,
       task: (
         <>
-          기간 <b>평일 밤</b>, 인원 <b>이하</b> → <b>한적</b>
+          <b>[+ 가게·시설 조건]</b> → <b>카페 5곳 이상</b>
         </>
       ),
       done: () =>
         !!newCat &&
-        newCat.conds.some((c) => c.src === 'pop' && c.days.join() === '0' && c.times.join() === '3' && c.mode === 'level' && c.op === 'lte' && c.value2 === 1),
+        newCat.conds.some((c) => c.src === 'poi' && c.cats.join() === 'cafe' && (c.by ?? 'count') === 'count' && c.op === 'gte' && c.mode === 'abs' && c.value >= 5),
     },
     {
-      target: '.switch-row',
+      target: '.cat.open .cat-name',
       doneTarget: '.map-wrap:not(.detail)',
-      onEnter: () => {
-        setTab('type');
-        // 조건 결과(노란 칸)가 켜져 있으면 성격 색이 가려지므로 잠깐 끈다 — '만든 성격으로 걸러 보기'에서 다시 켬
-        setFiltersOn(false);
-        showTypesArea();
-      },
-      title: '지도에 색으로 보기',
-      body: <>칸마다 동네 성격 색으로 칠해져요. 조건 결과는 잠깐 꺼 둘게요.</>,
+      title: '접고 지도 보기',
+      body: <>편집 중에는 지도에 조건 값이 색 세기로 나와요. 접으면 성격 색으로 돌아가요.</>,
       task: (
         <>
-          <b>[지도에 색으로 보기]</b> 켜기 (키보드 <kbd>T</kbd>)
+          성격 이름 옆 <b>[접기]</b> 누르기
         </>
       ),
-      done: () => typesOn,
+      done: () => !heat,
     },
     {
+      id: 'newCatMap',
       target: '.map-wrap:not(.detail)',
       onEnter: () => {
-        setTypesOn(true);
-        setFiltersOn(false);
-        showTypesArea();
+        if (newCat) {
+          setHiddenList(hiddenList.filter((h) => h !== newCat.id));
+          setHiCat(newCat.id);
+          showCatArea(newCat.id);
+        } else showTypesArea();
       },
-      title: '동네 성격 지도',
+      title: '새 색이 생겼어요',
       body: (
         <>
-          칸 색이 그 칸의 동네 성격이에요. <b>{newCat?.label ?? '방금 만든 성격'}</b> 칸도 보여요. 아래 범례에서 성격별로 끄고 켤 수 있어요.
+          진하게 칠한 칸이 <b>{newCat?.label ?? '방금 만든 성격'}</b>
+          {eyo(newCat?.label ?? '방금 만든 성격')} ({(newCat && cls.counts.get(newCat.id)) || 0}곳). 범례에도 추가됐어요.
         </>
       ),
+    },
+    {
+      target: '.map-toggles [data-tour="filters"]',
+      doneTarget: '.map-wrap:not(.detail)',
+      title: '조건 결과 다시 켜기',
+      body: <>켜면 성격 색은 꺼져요.</>,
+      task: (
+        <>
+          지도 위 <b>[조건 결과]</b> 켜기 (키보드 <kbd>F</kbd>)
+        </>
+      ),
+      done: () => filtersOn,
     },
     {
       target: '.panel',
-      onEnter: () => {
-        setTab('filter');
-        setFiltersOn(true);
-      },
+      onEnter: () => setTab('filter'),
       title: '만든 성격으로 걸러 보기',
       body: <>동네 성격도 조건으로 쓸 수 있어요.</>,
       task: (
@@ -749,7 +807,7 @@ function Explorer({ data, spread, setSpread }: { data: Bootstrap; spread: boolea
           {tab === 'filter' && (
             <FilterSection
               on={filtersOn}
-              setOn={setFiltersOn}
+              setOn={showFilters}
               stack={stack}
               setStack={setStack}
               counts={run.stages.map((s) => s.length)}
@@ -773,7 +831,7 @@ function Explorer({ data, spread, setSpread }: { data: Bootstrap; spread: boolea
           {tab === 'type' && (
             <CategoriesSection
               on={typesOn}
-              setOn={setTypesOn}
+              setOn={showTypes}
               hidden={hidden}
               toggleHidden={(id) => setHiddenList(hidden.has(id) ? hiddenList.filter((v) => v !== id) : [...hiddenList, id])}
               cats={cats}
@@ -835,8 +893,6 @@ function Explorer({ data, spread, setSpread }: { data: Bootstrap; spread: boolea
                 cat={catById.get(cls.byId.get(selected.id)?.cat ?? '') ?? null}
                 filters={stack.map((f) => ({ f, text: describe(f, names), r: evalFilter(f, selected, fctx) }))}
                 onClose={() => selectCell(null)}
-                layer={valueLayer}
-                setLayer={setValueLayer}
               />
             ) : (
               <div className="empty-box">{gridVisible ? '지도에서 구역을 눌러 보세요.' : `지도를 확대하면 ${CELL_SIZE}m 단위 구역이 나타나고, 눌러서 자세히 볼 수 있어요.`}</div>
@@ -862,25 +918,16 @@ function Explorer({ data, spread, setSpread }: { data: Bootstrap; spread: boolea
         {useKakao ? <KakaoMap {...mapProps} onError={(e) => setMapError(e.message)} /> : <SvgMap {...mapProps} />}
         <div className="map-toggles">
           {gridVisible && (
-            <button className={typesOn ? 'on' : ''} onClick={() => setTypesOn(!typesOn)} title="동네 성격 색으로 보기 (T)">
+            <button data-tour="types" className={typesOn ? 'on' : ''} onClick={() => showTypes(!typesOn)} title="동네 성격 색으로 보기 (T)">
               동네 성격 <kbd>T</kbd>
             </button>
           )}
           {stack.length > 0 && (
-            <button className={filtersOn ? 'on' : ''} onClick={() => setFiltersOn(!filtersOn)} title="필터 결과 표시 (F)">
+            <button data-tour="filters" className={filtersOn ? 'on' : ''} onClick={() => showFilters(!filtersOn)} title="필터 결과 표시 (F)">
               조건 결과 <kbd>F</kbd>
             </button>
           )}
         </div>
-        {valueLayer && (
-          <div className="value-banner">
-            <b>칸 숫자</b> {layerText(valueLayer)}
-            {!gridVisible || valueCells === 'many' ? <span className="muted"> · 더 확대하면 보여요</span> : null}
-            <button className="link" onClick={() => setValueLayer(null)}>
-              끄기
-            </button>
-          </div>
-        )}
         {/* 범례: 지금 지도에 켜진 것을 한 곳에서 설명 */}
         {(heatInfo || filterActive || (typesOn && gridVisible)) && (
           <div className="legend-box">

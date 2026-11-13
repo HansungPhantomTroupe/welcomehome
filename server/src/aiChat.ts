@@ -9,7 +9,7 @@
  *   (도구 호출 대신 글 형식을 쓰는 건, ChatGPT 플랜 경로의 도구 지원 범위가 아직 미리보기라서)
  */
 import { CUSTOM_API_DOC } from '../../shared/customApi';
-import type { Cell, DongStat, Place } from '../../shared/types';
+import type { Cell, DongStat } from '../../shared/types';
 import { respond, type InputMsg } from './chatgpt';
 import { runCustom, validateScript, type CustomScript } from './customFilter';
 
@@ -125,7 +125,7 @@ function extract(text: string): { plan: any; raw: string; bad?: string } | null 
 const TYPES = new Set(['pop', 'poi', 'depts', 'category', 'commute', 'dong', 'custom']);
 
 /** 목록 확인: custom 은 돌려 보고, 나머지는 형식만 */
-async function check(plan: any, cells: Cell[], places: Place[], size: number, cx: ChatContext, dongs: DongStat[], dests: string[]) {
+async function check(plan: any, cells: Cell[], size: number, cx: ChatContext, dongs: DongStat[], dests: string[]) {
   if (!plan || !Array.isArray(plan.stack)) return ['{ "stack": [...] } 형식이 아님'];
   const ids = new Set(cx.stack.map((f) => String(f.id)));
   const out: string[] = [];
@@ -154,7 +154,7 @@ async function check(plan: any, cells: Cell[], places: Place[], size: number, cx
         out.push(`${at} (${it.name}): 형식 오류 ${bad}`);
         continue;
       }
-      const r = await runCustom(cells, places, size, script, it.values ?? {});
+      const r = await runCustom(cells, size, script, it.values ?? {});
       if (!r.ok) out.push(`${at} (${it.name}): 실행 오류 ${r.error}`);
       else if (r.pass.length === 0 || r.pass.length === cells.length)
         out.push(`${at} (${it.name}): 기본값으로 ${cells.length}칸 중 ${r.pass.length}칸 통과 — 조건이 ${r.pass.length ? '너무 넓음' : '너무 좁음'}`);
@@ -176,7 +176,7 @@ export async function chat(
   model: string,
   history: InputMsg[],
   cx: ChatContext,
-  d: { cells: Cell[]; places: Place[]; size: number; dongs: DongStat[]; dests: string[] },
+  d: { cells: Cell[]; size: number; dongs: DongStat[]; dests: string[] },
 ): Promise<ChatResult> {
   const input = history.slice(-MAX_HISTORY);
   const instr = instructions(d.cells, d.size, d.dongs, d.dests, cx);
@@ -188,7 +188,7 @@ export async function chat(
     const ex = extract(text);
     if (!ex) return { reply: text.trim(), history: input };
     const reply = text.replace(ex.raw, '').trim();
-    const problems = ex.bad ? [ex.bad] : await check(ex.plan, d.cells, d.places, d.size, cx, d.dongs, d.dests);
+    const problems = ex.bad ? [ex.bad] : await check(ex.plan, d.cells, d.size, cx, d.dongs, d.dests);
     if (!problems.length) return { reply, plan: ex.plan, history: input };
     if (attempt === MAX_FIX) return { reply: `${reply}\n\n(목록을 고치지 못했어요: ${problems.join(' / ')})`.trim(), history: input };
     input.push({ role: 'user', content: `[실행 결과] ${problems.join('\n')}` });

@@ -24,8 +24,6 @@ export const FILES = {
   cells: path.join(GEN_DIR, 'cells.json'),
   dongStats: path.join(GEN_DIR, 'dong_stats.json'),
   meta: path.join(GEN_DIR, 'meta.json'),
-  /** 셀별 월별 원본 값 (고른 구역 화면에서 한 칸씩 받아 감) */
-  cellMonthly: path.join(GEN_DIR, 'cell_monthly.json'),
 };
 
 export const KAKAO_REST_KEY = process.env.KAKAO_REST_KEY ?? '';

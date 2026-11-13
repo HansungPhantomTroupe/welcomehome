@@ -15,7 +15,7 @@ import { CELL_SIZE, FILES, SEOUL_MIN_LAT, toUtmk, toWgs } from '../src/config';
 import { coord2address } from '../src/kakao';
 import { distM, estimateCommute } from '../../shared/geo';
 import { AGE_GROUPS, DAY_GROUPS, TIME_SLOTS } from '../../shared/cellTypes';
-import type { Cell, CellType, DongStat, Level, Meta, Place, PlaceCat, SlotMatrix } from '../../shared/types';
+import type { Cell, GeneratedCell, CellType, DongStat, Level, Meta, Place, PlaceCat, SlotMatrix } from '../../shared/types';
 import { gridId, type GridCell } from './genGrid';
 
 /** LG U+ 50m 원본 셀 (genGrid) */
@@ -390,7 +390,7 @@ function classify(r: (typeof rows)[number]): { type: CellType; tags: CellType[] 
   return { type, tags };
 }
 
-const cells: Cell[] = rows.map((r) => {
+const cells: GeneratedCell[] = rows.map((r) => {
   const { type, tags } = classify(r);
   const green = type === 'green';
   return {
@@ -431,7 +431,7 @@ const cells: Cell[] = rows.map((r) => {
 });
 
 // ---------- 4. 행정동 통계 ----------
-const byDong = new Map<string, Cell[]>();
+const byDong = new Map<string, GeneratedCell[]>();
 for (const c of cells) {
   if (!byDong.has(c.dongCode)) byDong.set(c.dongCode, []);
   byDong.get(c.dongCode)!.push(c);
@@ -474,9 +474,6 @@ const meta: Meta = {
 await fsp.writeFile(FILES.cells, JSON.stringify(cells));
 await fsp.writeFile(FILES.dongStats, JSON.stringify(dongStats));
 await fsp.writeFile(FILES.meta, JSON.stringify(meta, null, 2));
-// 월별 평균 인원 (200m 칸, 튀는 값 퍼뜨린 뒤): { months, cols, cells: { 칸ID: [월][요일 2][시간대 4][지표 6] 를 한 줄로 } }
-const cellMonthly = Object.fromEntries(coarseList.map((c) => [c.id, c.month.map((v) => +v.toFixed(2))]));
-await fsp.writeFile(FILES.cellMonthly, JSON.stringify({ months, cols: RAW_COLS, cells: cellMonthly }));
 
 const tc: Record<string, number> = {};
 for (const c of cells) tc[c.type] = (tc[c.type] ?? 0) + 1;

@@ -27,6 +27,10 @@ export interface Place {
   url?: string;
 }
 
+/** 가까운 시설 거리를 계산하는 종류 (bar = 술집 계열 음식점) */
+export const NEAR_KINDS = ['food', 'cafe', 'bar', 'conv', 'hosp', 'pharm', 'gym', 'subway', 'mart'] as const;
+export type NearKind = (typeof NEAR_KINDS)[number];
+
 /** 셀 유형 */
 export type CellType =
   | 'quiet' // 조용한 주거형
@@ -46,8 +50,8 @@ export type SlotMatrix = [[number, number, number, number], [number, number, num
 export interface Cell {
   id: string;
   /** EPSG:5179 셀 중심 좌표 (LG U+ 명세의 Cell center X/Y) */
-  cx: number;
-  cy: number;
+  cx?: number;
+  cy?: number;
   center: LatLng;
   /** 셀 꼭짓점 (WGS84) */
   corners: LatLng[];
@@ -78,9 +82,9 @@ export interface Cell {
    */
   demo: number[];
   /** 금~일 21-24 / 월~목 21-24 */
-  weekendSurge: number;
+  weekendSurge?: number;
   /** 21-24 비중 */
-  nightShare: number;
+  nightShare?: number;
 
   levels: {
     total: Level;
@@ -91,16 +95,21 @@ export interface Cell {
 
   // 셀 내부 시설
   poi: Record<PlaceCat, number> & { bar: number };
-  /** 셀 중심에서 종류별 가장 가까운 시설까지 거리(m) — 받은 뒤 화면에서 계산 (withNearDist) */
-  nearM?: Partial<Record<PlaceCat | 'bar', number>>;
+  /** 칸 중심에서 종류별 가장 가까운 시설까지 거리(m, 정수). 그 종류가 하나도 없으면 null. 서버(PostGIS)가 계산 */
+  nearM: Record<NearKind, number | null>;
+  /** 가장 가까운 지하철역 (구역 이름 '○○역 주변' 용). 없으면 null */
+  nearSubway: { name: string; m: number } | null;
   depts: string[];
 
-  type: CellType;
+  type?: CellType;
   /** 주 유형 외 부가 성격 */
-  tags: CellType[];
+  tags?: CellType[];
   /** 한성대(목적지) 기준 추정 통학 시간(분) */
-  commuteMin: number;
+  commuteMin?: number;
 }
+
+/** 데이터 생성 단계(build:features)가 만드는 칸 — 가까운 시설 거리는 서버가 붙이고, 유형 필드는 이 단계에서 늘 채움 */
+export type GeneratedCell = Omit<Cell, 'nearM' | 'nearSubway' | 'type' | 'tags' | 'commuteMin'> & { type: CellType; tags: CellType[]; commuteMin: number };
 
 export interface DongStat {
   code: string;

@@ -32,11 +32,9 @@ import {
   type StepResult,
 } from './engine';
 import { KERNEL_EXAMPLES } from './examples';
-import { attachNearDist } from '../placeIndex';
 
 interface Bootstrap {
   cells: Cell[];
-  places: Place[];
   dongStats: DongStat[];
   meta: Meta;
 }
@@ -85,7 +83,7 @@ export default function KernelLab() {
   useEffect(() => {
     fetch('/api/bootstrap')
       .then(async (r) => (r.ok ? r.json() : Promise.reject(new Error((await r.json()).error))))
-      .then((d) => setData(attachNearDist(d)))
+      .then((d) => setData(d))
       .catch((e) => setErr(e.message));
   }, []);
   if (err) return <div className="fatal">데이터를 불러오지 못했습니다: {err}</div>;

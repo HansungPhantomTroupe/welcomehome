@@ -10,7 +10,7 @@
  *        poi(cell, 종류[]) · nearest(cell, 종류) · rank(fn)(cell) · median(xs) · quantile(xs, q)
  */
 import { getQuickJS, shouldInterruptAfterDeadline } from 'quickjs-emscripten';
-import type { Cell, Place } from '../../shared/types';
+import type { Cell } from '../../shared/types';
 
 export interface ScriptParam {
   key: string;
@@ -64,27 +64,8 @@ export function validateScript(s: unknown): string | null {
 // ---------- 스크립트에 넘길 칸 데이터 ----------
 const POI_KEYS = ['food', 'cafe', 'bar', 'conv', 'hosp', 'pharm', 'gym', 'subway', 'mart'] as const;
 let payload: { key: unknown; json: string } | null = null;
-function cellPayload(cells: Cell[], places: Place[], size: number) {
+function cellPayload(cells: Cell[], size: number) {
   if (payload?.key === cells) return payload.json;
-  // 종류별 가장 가까운 시설까지 거리 (m)
-  const B = 0.004;
-  const bucket = new Map<string, Place[]>();
-  for (const p of places) {
-    const k = `${Math.floor(p.lat / B)}:${Math.floor(p.lng / B)}`;
-    (bucket.get(k) ?? bucket.set(k, []).get(k)!).push(p);
-  }
-  const d = (a: { lat: number; lng: number }, b: { lat: number; lng: number }) => Math.hypot((a.lat - b.lat) * 111000, (a.lng - b.lng) * 88200);
-  const nearestOf = (c: Cell, key: string) => {
-    for (const r of [1, 3, 8]) {
-      let best = Infinity;
-      const [bi, bj] = [Math.floor(c.center.lat / B), Math.floor(c.center.lng / B)];
-      for (let i = bi - r; i <= bi + r; i++)
-        for (let j = bj - r; j <= bj + r; j++)
-          for (const p of bucket.get(`${i}:${j}`) ?? []) if (key === 'bar' ? p.bar : p.cat === key) best = Math.min(best, d(c.center, p));
-      if (best <= r * B * 88200) return Math.round(best);
-    }
-    return null;
-  };
   const out = cells.map((c) => {
     const [, i, j] = c.id.match(/^SB(\d+)_(\d+)$/)!.map(Number);
     return {
@@ -101,7 +82,7 @@ function cellPayload(cells: Cell[], places: Place[], size: number) {
       kind: c.kindShare,
       poi: c.poi,
       depts: c.depts.length,
-      near: Object.fromEntries(POI_KEYS.map((k) => [k, nearestOf(c, k)])),
+      near: Object.fromEntries(POI_KEYS.map((k) => [k, c.nearM?.[k] ?? null])),
     };
   });
   payload = { key: cells, json: JSON.stringify({ size, cells: out }) };
@@ -179,7 +160,7 @@ const RUNNER = String.raw`
 `;
 
 /** 스크립트를 모든 칸에 돌린다 */
-export async function runCustom(cells: Cell[], places: Place[], size: number, script: CustomScript, values: Record<string, unknown>): Promise<RunResult> {
+export async function runCustom(cells: Cell[], size: number, script: CustomScript, values: Record<string, unknown>): Promise<RunResult> {
   const t0 = Date.now();
   const params = Object.fromEntries(script.params.map((p) => [p.key, p.key in values ? values[p.key] : p.default]));
   const QJS = await getQuickJS();
@@ -188,7 +169,7 @@ export async function runCustom(cells: Cell[], places: Place[], size: number, sc
   rt.setInterruptHandler(shouldInterruptAfterDeadline(Date.now() + TIME_LIMIT_MS));
   const vm = rt.newContext();
   try {
-    const json = vm.newString(cellPayload(cells, places, size));
+    const json = vm.newString(cellPayload(cells, size));
     vm.setProp(vm.global, '__JSON', json);
     json.dispose();
     const step = (code: string, where: string) => {
