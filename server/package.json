@@ -10,12 +10,16 @@
     "build:features": "tsx scripts/buildFeatures.ts",
     "data": "npm run gen:grid && npm run collect && npm run build:features",
     "typecheck": "tsc --noEmit",
-    "import:generated": "tsx scripts/importGenerated.ts"
+    "import:generated": "tsx scripts/importGenerated.ts",
+    "import:listings": "tsx scripts/importListings.ts",
+    "import:deals": "tsx scripts/importDeals.ts",
+    "import:articles": "tsx scripts/importArticles.ts"
   },
   "dependencies": {
     "compression": "^1.8.2",
     "cors": "^2.8.5",
     "dotenv": "^16.4.7",
+    "exceljs": "^4.4.0",
     "express": "^4.21.2",
     "pg": "^8.23.1",
     "proj4": "^2.15.0",

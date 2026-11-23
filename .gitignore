@@ -12,3 +12,5 @@ data/raw/living_pop_dong/
 data/raw/bus_stops/
 # ChatGPT 로그인 토큰 (외부 공유 금지)
 data/auth/
+# 페르소나 (DB 없을 때 저장 파일)
+data/personas.json

@@ -1,7 +1,7 @@
 /**
  * AI 조건 찾기 도우미 — 사용자의 말을 받아 "조건 찾기" 목록 전체를 다시 짠다.
  *
- * - 이미 화면에서 다룰 수 있는 조건(사람·가게/시설·진료과·동네 성격·이동 시간·행정동)은 그 형식으로,
+ * - 이미 화면에서 다룰 수 있는 조건(사람·가게/시설·진료과·동네 성격·이동 시간·행정동·매물)은 그 형식으로,
  *   그걸로 안 되는 것(주변 칸 보기 등)만 custom 스크립트로.
  * - 필요하면 여러 조건으로 나누고, 기존 조건을 유지·수정·삭제한다.
  * - AI는 답 안에 ```json { "stack": [...] } ``` 블록 하나로 새 목록을 낸다. 서버가 custom 스크립트를 격리 실행기로 돌려 보고,
@@ -21,6 +21,14 @@ export interface ChatContext {
   stack: Record<string, unknown>[];
   /** 사용자가 정의한 동네 성격 */
   categories: { id: string; label: string; desc?: string }[];
+  /** 지금 걸러진 칸들 vs 전체 칸 비교 (웹이 계산한 요약 숫자) — 조건이 없거나 전부 통과면 없음 */
+  insight?: {
+    count: number;
+    total: number;
+    rows: { label: string; sel: number; all: number; pct: number | null }[];
+    /** 매물끼리 비교 (매물이 모자라면 없음) */
+    listing?: { basis: string; selN: number; cmpN: number; rows: { label: string; sel: number; cmp: number }[] };
+  };
 }
 
 const EXAMPLE_CUSTOM = {
@@ -50,8 +58,8 @@ function dataSummary(cells: Cell[], size: number) {
   ].join('\n');
 }
 
-function instructions(cells: Cell[], size: number, dongs: DongStat[], dests: string[], cx: ChatContext) {
-  return `너는 주거지 탐색 지도 앱의 "조건 찾기" 도우미다. 사용자가 말로 원하는 동네를 설명하면, 지도 칸을 거르는 **조건 목록 전체**를 다시 짠다.
+function instructions(cells: Cell[], size: number, dongs: DongStat[], dests: string[], cx: ChatContext, personas: string, listings: string) {
+  return `너는 동네 탐색 지도 앱의 안내 도우미다. 사용자가 이 사이트를 쓰는 목적을 듣고, 필요한 정보를 질문으로 모은 뒤, 지도 칸을 거르는 **조건 목록 전체**를 짜서 제안한다.
 
 [데이터]
 ${dataSummary(cells, size)}
@@ -76,12 +84,17 @@ ${dataSummary(cells, size)}
 4) 동네 성격: { "type":"category", "ids":[동네 성격 id] }  칸의 분류가 그중 하나
 5) 이동 시간: { "type":"commute", "dest":"목적지 이름", "maxMin": 분 }  대중교통 추정 시간 이내
 6) 행정동: { "type":"dong", "codes":[행정동 코드] }  그중 하나에 속한 칸
-7) 스크립트(위 1~6으로 안 될 때만): { "type":"custom", "name", "description", "params":[...], "values":{}, "code" }
+7) 매물: { "type":"listing", "cats":[분류], "trades":[거래유형], "kinds":[매물 유형], "depositMax": 만원|null, "rentMax": 만원|null, "areaMin": ㎡|null, "minCount": 건 }
+   - 칸 안에 기준에 맞는 매물이 minCount 건 이상인 칸. cats·trades·kinds 를 비우면 전부. 상한·하한은 null 이면 제한 없음.
+   - depositMax 는 보증금(월세) · 전세금 · 매매가 모두 이 값으로 본다. 예) "월세 60 이하 원룸" = { "type":"listing", "trades":["월세"], "kinds":["원룸"], "rentMax":60, "minCount":1 }
+8) 스크립트(위 1~7로 안 될 때만): { "type":"custom", "name", "description", "params":[...], "values":{}, "code" }
 
 [화면 조건으로 쓸 수 있는 값]
 - 동네 성격: ${cx.categories.map((c) => `${c.id}=${c.label}${c.desc ? `(${c.desc})` : ''}`).join(', ') || '없음'}
 - 목적지: ${dests.join(', ')}
 - 행정동: ${dongs.map((d) => `${d.code}=${d.name}`).join(', ')}
+- 매물 (분류 · 거래유형 · 매물 유형: 건수, 금액 범위 — 이 값들로만 cats·trades·kinds 를 쓴다):
+${listings || '(매물 데이터 없음 — listing 항목을 쓰지 않는다)'}
 
 [스크립트 형식 (type custom)]
 - name: 60자 이하 한국어 이름. description: 한 문장으로 무엇을 거르는지.
@@ -99,12 +112,60 @@ ${JSON.stringify(EXAMPLE_CUSTOM, null, 2)}
 ${cx.stack.length ? JSON.stringify(cx.stack, null, 1) : '(비어 있음)'}
 (text 는 화면에 보이는 문장. 답에 다시 쓸 필요 없음)
 
+[지금 결과의 특징]
+${
+    cx.insight
+      ? `지금 지도에 남은 칸 ${cx.insight.count}곳을 전체 ${cx.insight.total}칸과 비교한 지표 전부 (중간값 기준, 뚜렷한 것부터).
+위치 = 남은 칸 중간값이 전체 칸 분포에서 몇 % 위치인지. 40~60 이면 전체와 비슷, 낮으면 전체보다 작음, 높으면 큼. 범주 지표는 비중 %.
+시간대별 인원, 시간대별 거주·직장·방문 비중, 연령·성별, 가게 수, 가까운 시설 거리, 목적지까지 이동 시간, 매물 수가 모두 들어 있다. 여기 있는 지표로 답할 수 있는 것은 "데이터가 없다"고 하지 않는다.
+${cx.insight.rows.map((r) => `- ${r.label}: 남은 칸 ${r.sel} / 전체 ${r.all}${r.pct === null ? '' : ` (위치 ${r.pct}%)`}`).join('\n')}`
+      : '(조건이 없거나 전부 통과 — 비교할 결과 없음)'
+  }
+${
+    cx.insight?.listing
+      ? `
+[지금 결과의 매물 비교]
+${cx.insight.listing.basis} — 걸러진 쪽 ${cx.insight.listing.selN}건 / 비교군 ${cx.insight.listing.cmpN}건
+${cx.insight.listing.rows.map((r) => `- ${r.label}: 걸러진 쪽 ${r.sel} / 비교군 ${r.cmp}`).join('\n')}
+(층·연식·방·관리비·설비 비중은 매물 태그 기준. 태그가 없는 매물은 해당 없음으로 셈)`
+      : ''
+  }
+
+${
+    personas
+      ? `[다른 사용자 사례]
+관리자가 저장한 "어떤 상황에서 어떤 조건을 왜 썼는지" 사례다. 다른 사람 이야기는 이 목록에 있는 것만 말할 수 있다.
+${personas}`
+      : `[다른 사용자 사례]
+저장된 사례가 없다. 다른 사람·다른 사용자가 어떻게 찾았는지는 한 마디도 하지 않는다.`
+  }
+
+[대화 흐름]
+- 대화는 화면이 먼저 띄운 질문(사이트를 쓰는 목적)으로 시작한다.
+- 목적을 파악하면, 그 목적에 맞는 조건을 고르는 데 필요한 정보를 **한 번에 하나씩** 질문해 모은다. 무엇을 물을지는 목적에 따라 네가 정한다. 데이터로 거를 수 있는 것(시간대별 사람 수, 인구 종류·연령·성별, 가게·시설, 이동 시간·목적지, 행정동)에 연결되는 질문만 한다.
+- **질문은 한 문장, 30자 안팎.** 설명·이유·선택지 나열(목적지 이름 목록 등)을 붙이지 않는다. 선택지는 아래 [빠른 답]으로 보여 준다.
+- 질문은 대화 전체에서 2~4번 안에 끝낸다. 사용자가 바로 조건을 원하거나 정보가 충분하면 바로 제안한다.
+- 제안할 때는 json 블록으로 목록을 내고, 조건마다 사용자가 말한 정보와 연결해 왜 골랐는지 짧게 설명한다.
+- [다른 사용자 사례]에 목적·상황이 비슷한 사례가 있으면 참고해 조건을 고르고, "비슷한 목적으로 찾은 분들은 ○○ 조건으로 찾았어요"처럼 자연스럽게 한 번 알려 준다. 목록에 없는 사례를 지어내지 않는다. 맞는 사례가 없으면 다른 사람 이야기를 하지 않는다.
+- 처음으로 목록을 제안한 답의 끝에 한 줄을 붙인다: "화면 위 ? 버튼을 누르면 조건을 직접 다루는 방법을 볼 수 있어요." 그 뒤로는 반복하지 않는다.
+
+[빠른 답]
+- 모든 답의 맨 끝에 사용자가 눌러서 바로 보낼 수 있는 짧은 답을 블록 하나로 붙인다:
+\`\`\`replies
+["답1", "답2", "답3"]
+\`\`\`
+- 2~4개, 각 15자 이내, 사용자가 하는 말투로 ("한성대 20분 안", "상관없어요").
+- 질문한 답이면 그 질문에 대한 대표적인 답들. 실제 선택지가 정해져 있으면(목적지 등) 그중에서 고른다. "상관없어요"·"바로 추천해 주세요" 같은 넘어가기 답을 하나 넣어도 된다.
+- 목록을 제안한 답이면 이어서 할 만한 요청 (조건을 넓히기·좁히기·추가 등).
+
 [대화 규칙]
-- 한국어, 보고서처럼 짧게. json 밖 설명은 2~4줄: 무엇을 추가·수정·삭제했는지와 기준만.
+- 한국어 존댓말, 짧게. 목록을 제안하는 답의 json 밖 설명은 2~4줄.
 - 요청을 조건 여러 개로 나누는 게 사용자가 조절하기 좋으면 나눈다. 사용자는 화면에서 각 조건을 끄고 켜거나 값을 바꿀 수 있다.
 - 새 요청이 지금 목록과 관계없는 다른 동네 찾기라면 목록을 새로 짜고(기존 조건 삭제), 기존 조건에 더하거나 고치는 요청이면 기존 조건을 keep·수정한다. 애매하면 기존 조건을 유지한다.
 - 데이터로 판단할 수 없는 요청(치안, 집값, 소음 측정 등)은 그렇다고 말하고, 가까운 대리 지표를 쓸지 제안한다. 대리 지표를 쓰면 description 이나 설명에 밝힌다.
 - 요청이 모호하면 json 없이 짧게 되묻는다.
+- 사용자가 지금 결과의 매물이 왜 싸거나 비싼지, 어떤 매물인지 물으면 [지금 결과의 매물 비교]를 근거로 답한다. 면적·㎡당 월세·층(지하·1층)·연식·방 개수·관리비·설비·유형 차이 중 큰 것부터, 걸러진 쪽과 비교군 숫자를 함께. 매물 수가 적으면 그렇다고 밝힌다.
+- 사용자가 지금 결과(남은 구역)의 공통점·특징을 물으면 [지금 결과의 특징]을 근거로 답한다. 조건으로 이미 건 것과 그 조건에서 당연히 따라 나오는 것은 빼고, 뚜렷한 것 3~5개를 숫자와 함께 짧게. 표에 없는 것은 추측하지 않는다. json 목록은 내지 않고, 마지막에 그중 조건으로 추가할 만한 것을 한 줄로 제안한다.
 - "[실행 결과]" 로 시작하는 메시지는 서버가 네 목록을 확인한 결과다. 지적한 항목을 고쳐 목록 전체를 다시 낸다.`;
 }
 
@@ -122,7 +183,7 @@ function extract(text: string): { plan: any; raw: string; bad?: string } | null 
   return null;
 }
 
-const TYPES = new Set(['pop', 'poi', 'depts', 'category', 'commute', 'dong', 'custom']);
+const TYPES = new Set(['pop', 'poi', 'depts', 'category', 'commute', 'dong', 'listing', 'custom']);
 
 /** 목록 확인: custom 은 돌려 보고, 나머지는 형식만 */
 async function check(plan: any, cells: Cell[], size: number, cx: ChatContext, dongs: DongStat[], dests: string[]) {
@@ -147,6 +208,13 @@ async function check(plan: any, cells: Cell[], size: number, cx: ChatContext, do
     if (it.type === 'category' && !(it.ids ?? []).some((x: string) => cx.categories.some((c) => c.id === x))) out.push(`${at}: 없는 동네 성격 id`);
     if (it.type === 'commute' && !dests.includes(it.dest)) out.push(`${at}: dest 는 ${dests.join('·')} 중 하나`);
     if (it.type === 'dong' && !(it.codes ?? []).some((x: string) => dongs.some((d) => d.code === String(x)))) out.push(`${at}: 없는 행정동 코드`);
+    if (it.type === 'listing') {
+      const arr = (v: unknown) => v === undefined || (Array.isArray(v) && v.every((x) => typeof x === 'string'));
+      const numOrNull = (v: unknown) => v === undefined || v === null || (typeof v === 'number' && v >= 0);
+      if (!arr(it.cats) || !arr(it.trades) || !arr(it.kinds)) out.push(`${at}: cats·trades·kinds 는 문자열 배열`);
+      if (!numOrNull(it.depositMax) || !numOrNull(it.rentMax) || !numOrNull(it.areaMin)) out.push(`${at}: depositMax·rentMax·areaMin 은 0 이상 숫자 또는 null`);
+      if (it.minCount !== undefined && !(Number.isInteger(it.minCount) && it.minCount >= 1)) out.push(`${at}: minCount 는 1 이상 정수`);
+    }
     if (it.type === 'custom') {
       const script: CustomScript = { name: it.name, description: it.description ?? '', params: it.params ?? [], code: it.code };
       const bad = validateScript(script);
@@ -163,8 +231,25 @@ async function check(plan: any, cells: Cell[], size: number, cx: ChatContext, do
   return out;
 }
 
+/** 답 끝의 ```replies [...]``` 블록 → 빠른 답 목록 (블록은 화면 문장에서 뺌) */
+function splitReplies(text: string): { text: string; replies: string[] } {
+  const m = [...text.matchAll(/```replies\s*\n?([\s\S]*?)```/g)].at(-1);
+  if (!m) return { text, replies: [] };
+  let replies: string[] = [];
+  try {
+    const v = JSON.parse(m[1]);
+    if (Array.isArray(v)) replies = v.filter((x) => typeof x === 'string' && x.trim()).map((x) => x.trim().slice(0, 30)).slice(0, 4);
+  } catch {
+    /* 형식이 틀리면 빠른 답 없이 */
+  }
+  return { text: text.replace(m[0], ''), replies };
+}
+const tidy = (t: string) => t.replace(/\n{3,}/g, '\n\n').trim();
+
 export interface ChatResult {
   reply: string;
+  /** 빠른 답 (화면 아래 버튼) */
+  replies: string[];
   /** 새 조건 목록 (AI 항목 형식). 목록을 바꾸지 않는 답이면 없음 */
   plan?: { stack: Record<string, unknown>[] };
   /** 다음 요청에 그대로 돌려줄 대화 (서버 피드백 포함) */
@@ -176,22 +261,24 @@ export async function chat(
   model: string,
   history: InputMsg[],
   cx: ChatContext,
-  d: { cells: Cell[]; size: number; dongs: DongStat[]; dests: string[] },
+  d: { cells: Cell[]; size: number; dongs: DongStat[]; dests: string[]; personas: string; listings: string },
 ): Promise<ChatResult> {
   const input = history.slice(-MAX_HISTORY);
-  const instr = instructions(d.cells, d.size, d.dongs, d.dests, cx);
+  const instr = instructions(d.cells, d.size, d.dongs, d.dests, cx, d.personas, d.listings);
   let last = '';
   for (let attempt = 0; attempt <= MAX_FIX; attempt++) {
     const text = await respond(sid, model, instr, input);
     input.push({ role: 'assistant', content: text });
     last = text;
-    const ex = extract(text);
-    if (!ex) return { reply: text.trim(), history: input };
-    const reply = text.replace(ex.raw, '').trim();
+    const { text: body, replies } = splitReplies(text);
+    const ex = extract(body);
+    if (!ex) return { reply: tidy(body), replies, history: input };
+    const reply = tidy(body.replace(ex.raw, ''));
     const problems = ex.bad ? [ex.bad] : await check(ex.plan, d.cells, d.size, cx, d.dongs, d.dests);
-    if (!problems.length) return { reply, plan: ex.plan, history: input };
-    if (attempt === MAX_FIX) return { reply: `${reply}\n\n(목록을 고치지 못했어요: ${problems.join(' / ')})`.trim(), history: input };
+    if (!problems.length) return { reply, replies, plan: ex.plan, history: input };
+    if (attempt === MAX_FIX) return { reply: `${reply}\n\n(목록을 고치지 못했어요: ${problems.join(' / ')})`.trim(), replies, history: input };
     input.push({ role: 'user', content: `[실행 결과] ${problems.join('\n')}` });
   }
-  return { reply: last, history: input };
+  const { text: body, replies } = splitReplies(last);
+  return { reply: tidy(body), replies, history: input };
 }

@@ -5,6 +5,7 @@
  *  - 구역 조건: 구역 안 지표(사람·가게 수) 또는 분류 종류
  *  - 이동 시간: 이 구역에서 고른 목적지까지 추정 시간
  *  - 행정동
+ *  - 매물: 구역 안에 기준(분류·거래·유형·금액·면적)에 맞는 매물이 몇 건 이상인지
  *  - 커스텀(AI): 서버의 격리 실행기에서 돌린 스크립트 결과 (주변 칸을 보는 조건 등)
  */
 import type { Cell } from '@shared/types';
@@ -24,6 +25,17 @@ export type FilterDef =
   | (Base & { type: 'cell'; pred: CellPred })
   | (Base & { type: 'commute'; maxMin: number; dest: Dest })
   | (Base & { type: 'dong'; codes: string[] })
+  /** 매물: 비운 목록은 전부, null 은 제한 없음. 금액은 만원, 면적은 전용 ㎡ */
+  | (Base & {
+      type: 'listing';
+      cats: string[];
+      trades: string[];
+      kinds: string[];
+      depositMax: number | null;
+      rentMax: number | null;
+      areaMin: number | null;
+      minCount: number;
+    })
   /** 커스텀: 스크립트는 숨기고 이름·입력칸만 보여 준다 */
   | (Base & { type: 'custom'; script: CustomScript; values: Record<string, ParamValue> });
 
@@ -55,6 +67,8 @@ export function describe(f: FilterDef, n: Names): string {
       return f.codes.length ? `행정동 ${f.codes.map(n.dong).join(', ')}` : '행정동 (선택 없음)';
     case 'cell':
       return f.pred.kind === 'metric' ? condText(f.pred.cond) : f.pred.ids.length ? `동네 성격 ${f.pred.ids.map(n.cat).join('·')}` : '동네 성격 (선택 없음)';
+    case 'listing':
+      return listingText(f);
     case 'custom':
       return `${f.script.name} · ${f.script.params
         .map((p) => {
@@ -66,12 +80,52 @@ export function describe(f: FilterDef, n: Names): string {
   }
 }
 
+/** 만원 → '1억 2,000만' · '60만' */
+export const manText = (m: number) => {
+  const eok = Math.floor(m / 10000);
+  const rest = m % 10000;
+  return eok ? `${eok}억${rest ? ` ${rest.toLocaleString()}만` : ''}` : `${rest.toLocaleString()}만`;
+};
+function listingText(f: Extract<FilterDef, { type: 'listing' }>) {
+  const what = [...f.cats, ...f.kinds, ...f.trades].join(' ');
+  const lim = [
+    f.rentMax !== null ? `월세 ${manText(f.rentMax)} 이하` : '',
+    f.depositMax !== null ? `${f.trades.length === 1 && f.trades[0] === '매매' ? '매매가' : '보증금'} ${manText(f.depositMax)} 이하` : '',
+    f.areaMin !== null ? `${f.areaMin}㎡ 이상` : '',
+  ].filter(Boolean);
+  return `${what ? `${what} ` : ''}매물${lim.length ? ` (${lim.join(', ')})` : ''} ${f.minCount}건 이상`;
+}
+
 // ---------------------------------------------------------------- 평가
+/** 매물 조건용 요약 (서버 /api/articles/index) */
+export interface ListingLite {
+  cell: string;
+  cat: string;
+  trade: string | null;
+  kind: string | null;
+  deposit: number | null;
+  rent: number | null;
+  area: number | null;
+  floor?: string | null;
+  tags?: string[];
+  dir?: string | null;
+}
+export type ListingCrit = Pick<Extract<FilterDef, { type: 'listing' }>, 'cats' | 'trades' | 'kinds' | 'depositMax' | 'rentMax' | 'areaMin'>;
+export const listingMatches = (f: ListingCrit, l: ListingLite) =>
+  (!f.cats.length || f.cats.includes(l.cat)) &&
+  (!f.trades.length || (l.trade !== null && f.trades.includes(l.trade))) &&
+  (!f.kinds.length || (l.kind !== null && f.kinds.includes(l.kind))) &&
+  (f.depositMax === null || (l.deposit !== null && l.deposit <= f.depositMax)) &&
+  (f.rentMax === null || (l.rent !== null && l.rent <= f.rentMax)) &&
+  (f.areaMin === null || (l.area !== null && l.area >= f.areaMin));
+
 export interface FilterCtx {
   me: MetricEval;
   catOf: (cellId: string) => string | null;
   /** 커스텀 조건의 서버 실행 결과 (아직이면 undefined) */
   custom?: (f: Extract<FilterDef, { type: 'custom' }>) => CustomState | undefined;
+  /** 구역별 매물 (아직 못 받았으면 undefined) */
+  listings?: Map<string, ListingLite[]>;
 }
 
 export function evalFilter(f: FilterDef, cell: Cell, ctx: FilterCtx): { ok: boolean; detail: string } {
@@ -82,6 +136,12 @@ export function evalFilter(f: FilterDef, cell: Cell, ctx: FilterCtx): { ok: bool
     }
     case 'dong':
       return { ok: f.codes.length === 0 || f.codes.includes(cell.dongCode), detail: cell.dongName };
+    case 'listing': {
+      // 매물을 아직 못 받았으면 거르지 않는다
+      if (!ctx.listings) return { ok: true, detail: '매물 불러오는 중' };
+      const n = (ctx.listings.get(cell.id) ?? []).filter((l) => listingMatches(f, l)).length;
+      return { ok: n >= f.minCount, detail: `${n}건` };
+    }
     case 'custom': {
       // 계산 중이거나 스크립트 오류면 거르지 않는다 (행정동 '선택 전'과 같은 처리)
       const st = ctx.custom?.(f);

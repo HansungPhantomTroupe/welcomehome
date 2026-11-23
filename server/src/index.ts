@@ -9,6 +9,8 @@ import { searchRect, stats, type Rect, type SearchSpec } from './kakao';
 import { runCustom, validateScript, type CustomScript, type RunResult } from './customFilter';
 import * as chatgpt from './chatgpt';
 import { chat } from './aiChat';
+import * as personas from './personas';
+import * as articles from './articles';
 import type { Cell, DongStat, GeneratedCell, Meta, Place } from '../../shared/types';
 
 const app = express();
@@ -28,7 +30,12 @@ let cache: BootstrapData | null = null;
 /** DB(PostGIS)가 있으면 DB에서, 없으면 data/generated 파일로 같은 모양을 만든다. 시설 목록은 화면으로 보내지 않는다 */
 async function data() {
   if (cache) return cache;
-  if (pool) return (cache = await readBootstrap());
+  if (pool) {
+    const d = await readBootstrap();
+    if (d) return (cache = d);
+    // PostGIS 표가 아직 없으면 (import:generated 전) 파일로 — 실거래·페르소나는 DB 그대로 씀
+    console.warn('DB에 지도 데이터가 없어 data/generated 파일을 읽어요. (npm run import:generated -w server)');
+  }
   const [cells, dongStats, places, meta] = await Promise.all([
     loadJson<GeneratedCell[]>(FILES.cells),
     loadJson<DongStat[]>(FILES.dongStats),
@@ -110,17 +117,80 @@ ai.post('/chat', wrap(async (req, res, sid) => {
   const cx = {
     stack: (Array.isArray(ctx.stack) ? ctx.stack : []).slice(0, 40),
     categories: (Array.isArray(ctx.categories) ? ctx.categories : []).slice(0, 30).map((c: any) => ({ id: String(c.id), label: String(c.label), desc: c.desc ? String(c.desc).slice(0, 200) : undefined })),
+    insight:
+      ctx.insight && Array.isArray(ctx.insight.rows)
+        ? {
+            count: Number(ctx.insight.count) || 0,
+            total: Number(ctx.insight.total) || 0,
+            rows: ctx.insight.rows
+              .slice(0, 150)
+              .filter((r: any) => r && typeof r.label === 'string')
+              .map((r: any) => ({ label: r.label.slice(0, 80), sel: Number(r.sel), all: Number(r.all), pct: r.pct === null ? null : Number(r.pct) })),
+            listing:
+              ctx.insight.listing && Array.isArray(ctx.insight.listing.rows)
+                ? {
+                    basis: String(ctx.insight.listing.basis ?? '').slice(0, 200),
+                    selN: Number(ctx.insight.listing.selN) || 0,
+                    cmpN: Number(ctx.insight.listing.cmpN) || 0,
+                    rows: ctx.insight.listing.rows
+                      .slice(0, 60)
+                      .filter((r: any) => r && typeof r.label === 'string')
+                      .map((r: any) => ({ label: r.label.slice(0, 80), sel: Number(r.sel), cmp: Number(r.cmp) })),
+                  }
+                : undefined,
+          }
+        : undefined,
   };
   res.json(
     await chat(sid, model, history, cx, {
       cells: d.cells,
       size: d.meta.cellSize,
+      personas: await personas.forPrompt(),
+      listings: await articles.forPrompt(),
       dongs: d.dongStats,
       dests: (d.meta.destinations ?? []).map((x: { name: string }) => x.name),
     }),
   );
 }));
 app.use('/api/ai', ai);
+
+// ---------- 페르소나 (관리 화면 /personas 에서 저장, AI 가 참고) ----------
+const pj = express.json({ limit: '300kb' });
+const pwrap = (fn: (req: express.Request, res: express.Response) => Promise<unknown>) => (req: express.Request, res: express.Response) =>
+  fn(req, res).catch((e) => res.status(500).json({ error: String(e.message ?? e) }));
+app.get('/api/personas', pwrap(async (_req, res) => res.json(await personas.list())));
+app.post('/api/personas', pj, pwrap(async (req, res) => {
+  const bad = personas.validate(req.body);
+  if (bad) return res.status(400).json({ error: bad });
+  res.status(201).json(await personas.create(req.body));
+}));
+app.put('/api/personas/:id', pj, pwrap(async (req, res) => {
+  const bad = personas.validate(req.body);
+  if (bad) return res.status(400).json({ error: bad });
+  const p = await personas.update(req.params.id, req.body);
+  if (!p) return res.status(404).json({ error: '없는 페르소나' });
+  res.json(p);
+}));
+app.delete('/api/personas/:id', pwrap(async (req, res) => {
+  if (!(await personas.remove(req.params.id))) return res.status(404).json({ error: '없는 페르소나' });
+  res.json({ ok: true });
+}));
+
+// ---------- 매물 (wh_articles) ----------
+const awrap = (fn: (req: express.Request, res: express.Response) => Promise<unknown>) => (req: express.Request, res: express.Response) =>
+  fn(req, res).catch((e) => res.status(e instanceof articles.NoArticles ? 503 : 500).json({ error: String(e.message ?? e) }));
+/** GET /api/articles/index → 탐색 지역 안 매물 요약 [{ cell, cat, trade, kind, deposit, rent, area }] ('매물' 조건용) */
+app.get('/api/articles/index', awrap(async (_req, res) => res.json(await articles.index())));
+/** GET /api/articles/types → [{ category: '상가', trade: '월세', n }] (탐색 지역 안 건수) */
+app.get('/api/articles/types', awrap(async (_req, res) => res.json(await articles.types())));
+/** GET /api/articles/counts?cat=주거,상가&trade=월세,전세 → { 칸ID: 매물 수 } (비우면 전부) */
+app.get('/api/articles/counts', awrap(async (req, res) => res.json(await articles.counts(articles.parseTrades(req.query.cat), articles.parseTrades(req.query.trade)))));
+/** GET /api/articles?cell=SB…&cat=상가&trade=월세 → 그 칸의 매물 목록 */
+app.get('/api/articles', awrap(async (req, res) => {
+  const cell = String(req.query.cell ?? '');
+  if (!/^SB\d+_\d+$/.test(cell)) return res.status(400).json({ error: 'cell=SB{행}_{열} 이 필요해요.' });
+  res.json(await articles.byCell(cell, articles.parseTrades(req.query.cat), articles.parseTrades(req.query.trade)));
+}));
 
 /** 데이터 재생성 후 메모리 캐시 비우기 */
 app.post('/api/reload', (_req, res) => {

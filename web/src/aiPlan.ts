@@ -35,6 +35,8 @@ export function toItem(f: FilterDef, text: string): PlanItem {
       return { ...base, type: 'commute', dest: f.dest.name, maxMin: f.maxMin };
     case 'dong':
       return { ...base, type: 'dong', codes: f.codes };
+    case 'listing':
+      return { ...base, type: 'listing', cats: f.cats, trades: f.trades, kinds: f.kinds, depositMax: f.depositMax, rentMax: f.rentMax, areaMin: f.areaMin, minCount: f.minCount };
     case 'custom':
       return { ...base, type: 'custom', name: f.script.name, description: f.script.description, params: f.script.params, values: f.values, code: f.script.code };
   }
@@ -109,6 +111,20 @@ function build(it: PlanItem, ctx: Ctx, old?: FilterDef): Omit<FilterDef, 'id' | 
       const codes = (Array.isArray(it.codes) ? it.codes : []).map(String).filter((c: string) => ctx.dongCodes.has(c));
       if (!codes.length) throw new Error('dong.codes 는 행정동 코드 중에서');
       return { type: 'dong', codes } as any;
+    }
+    case 'listing': {
+      const strs = (v: unknown) => (Array.isArray(v) ? v.filter((x) => typeof x === 'string') : []);
+      const lim = (v: unknown) => (typeof v === 'number' && v >= 0 ? v : null);
+      return {
+        type: 'listing',
+        cats: strs(it.cats),
+        trades: strs(it.trades),
+        kinds: strs(it.kinds),
+        depositMax: lim(it.depositMax),
+        rentMax: lim(it.rentMax),
+        areaMin: lim(it.areaMin),
+        minCount: Math.max(1, Math.round(Number(it.minCount) || 1)),
+      } as any;
     }
     case 'custom': {
       const script: CustomScript = { name: it.name, description: it.description ?? '', params: it.params ?? [], code: it.code };

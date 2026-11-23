@@ -17,6 +17,7 @@
 | GET | `/api/bootstrap` | 앱을 열 때 1번 | 1차 |
 | POST | `/api/custom/run` | AI가 만든 조건을 계산할 때 | 보류 (AI) |
 | * | `/api/ai/*` | AI 탭 | 보류 (AI) |
+| GET·POST·PUT·DELETE | `/api/personas` | 페르소나 관리 화면(`/personas`) · AI 가 참고 | 3장 |
 
 ---
 
@@ -213,3 +214,32 @@ AI 기능은 나중에 붙인다. 그때 필요한 것:
 - `/api/ai/status`, `/login`, `/login/finish`, `/logout`, `/models`, `/chat` — ChatGPT 로그인과 대화.
 
 보류 중에는 웹의 AI 탭과 AI가 만든 조건만 동작하지 않고, 나머지는 1장만으로 모두 동작한다.
+
+---
+
+## 3. 페르소나 `/api/personas`
+
+관리 화면(`/personas`)에서 "어떤 상황에서 어떤 조건을 왜 썼는지"를 저장하고, AI 가 다른 사용자에게 비슷한 목적의 사례로 알려 줄 때 참고한다. 접근 제한 없음.
+
+Persona:
+```jsonc
+{
+  "id": "pe387892140f0",
+  "title": "저녁에 카페 작업하는 대학생 자취",          // 1~80자
+  "description": "20대 대학생. 저녁에 활기찬 곳, 카페가 많은 곳…",   // 3000자 이하
+  "stack": [FilterDef, …],          // 화면 조건 목록 그대로 (1~40개). 불러오기용
+  "categories": [Category, …],      // 조건이 쓰는 동네 성격 정의 (다른 사람 화면에 없을 수 있어 함께 저장)
+  "items": [{ "text": "카페 5곳 이상", "type": "poi", … }],   // AI 용: 화면 문장 + AI 항목 형식
+  "createdAt": "ISO 시각",
+  "updatedAt": "ISO 시각"
+}
+```
+
+| 메서드 · 경로 | 요청 | 응답 |
+|---|---|---|
+| GET `/api/personas` | | `Persona[]` (최근 수정 순) |
+| POST `/api/personas` | `{ title, description, stack, categories, items }` | 201 `Persona` |
+| PUT `/api/personas/{id}` | POST 와 같음 | `Persona` · 없으면 404 |
+| DELETE `/api/personas/{id}` | | `{ ok: true }` · 없으면 404 |
+
+형식이 틀리면 400 `{ error }`. 저장소: PostgreSQL `wh_personas` 테이블 (DB 없으면 `data/personas.json`).

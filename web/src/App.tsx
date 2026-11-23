@@ -2,7 +2,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { CELL_SIZE } from '@shared/cellTypes';
 import type { Cell, DongStat, LatLng, Meta, Place } from '@shared/types';
 import { classifyAll, condSubject, condUnit, defaultCategories, makeMetricEval, type Category, type Cond } from './classify';
-import { describe, evalFilter, runFilters, type FilterCtx, type FilterDef, type Names } from './filters';
+import { describe, evalFilter, listingMatches, runFilters, type FilterCtx, type FilterDef, type Names, type ListingLite } from './filters';
 import type { ExplainCtx } from './CondBuilder';
 import KakaoMap, { hasKakaoKey } from './map/KakaoMap';
 import SvgMap from './map/SvgMap';
@@ -12,6 +12,9 @@ import FilterSection from './FilterSection';
 import CellSection from './CellSection';
 import DebugRank from './DebugRank';
 import AiSection from './AiSection';
+import PersonaSection from './PersonaSection';
+import { computeInsight, computeListingInsight } from './insights';
+import ListingPanel, { articlePin, type Article } from './ListingPanel';
 import { customKey, runCustomScript, type CustomState } from './filters';
 import Tutorial, { type TourStep } from './Tutorial';
 
@@ -22,6 +25,53 @@ interface Bootstrap {
 }
 
 // ---------------------------------------------------------------- 저장 (브라우저별 편의 설정)
+/** 키별 건수 합 (나온 순서 유지) */
+function sumBy<T extends { n: number }>(xs: T[], key: (x: T) => string): { key: string; n: number }[] {
+  const m = new Map<string, number>();
+  for (const x of xs) m.set(key(x), (m.get(key(x)) ?? 0) + x.n);
+  return [...m].map(([key, n]) => ({ key, n }));
+}
+
+/** 켜고 끄는 칩 묶음 — 비어 있으면 '전부', 전부 고르면 다시 비움 */
+function ChipGroup({ items, picked, setPicked }: { items: { key: string; n: number }[]; picked: string[]; setPicked: (v: string[]) => void }) {
+  const all = items.map((i) => i.key);
+  return (
+    <>
+      {items.map(({ key, n }) => {
+        const on = !picked.length || picked.includes(key);
+        return (
+          <button
+            key={key}
+            className={on ? 'on' : ''}
+            onClick={() => {
+              const cur = picked.length ? picked.filter((p) => all.includes(p)) : all;
+              const next = on ? cur.filter((t) => t !== key) : [...cur, key];
+              setPicked(next.length === all.length ? [] : next.length ? next : ['(없음)']);
+            }}
+          >
+            {key} <em>{n}</em>
+          </button>
+        );
+      })}
+    </>
+  );
+}
+
+/** 위치가 있는 매물을 m 미터 안에 모인 것끼리 묶기 (먼저 만든 묶음의 중심 기준) */
+function clusterNear(list: Article[], m: number): Article[][] {
+  const out: { lat: number; lng: number; items: Article[] }[] = [];
+  for (const a of list) {
+    if (!a.lat || !a.lng) continue;
+    const g = out.find((o) => Math.hypot((o.lat - a.lat!) * 111_000, (o.lng - a.lng!) * 88_200) <= m);
+    if (g) {
+      g.items.push(a);
+      g.lat += (a.lat - g.lat) / g.items.length;
+      g.lng += (a.lng - g.lng) / g.items.length;
+    } else out.push({ lat: a.lat, lng: a.lng, items: [a] });
+  }
+  return out.map((o) => o.items);
+}
+
 /** 받침 있으면 '이에요', 없으면 '예요' */
 const eyo = (w: string) => {
   const c = w.trim().charCodeAt(w.trim().length - 1) - 0xac00;
@@ -113,7 +163,15 @@ function Explorer({ data, spread, setSpread }: { data: Bootstrap; spread: boolea
   const gridVisible = CELL_M / mPerPx >= GRID_MIN_PX;
   const [selectedId, selectCell] = useState<string | null>(null);
   // 패널 탭: 필터 · 종류 · 구역 — 구역을 골라도 탭은 그대로 (구역 탭에 표시만)
-  const [tab, setTab] = usePersisted<'filter' | 'type' | 'cell' | 'rank' | 'ai'>('wh.tab', () => 'filter');
+  // /personas: 지금 화면 + 페르소나 관리 탭
+  const personaMode = location.pathname.replace(/\/+$/, '') === '/personas';
+  const [tabRaw, setTab] = usePersisted<'filter' | 'type' | 'cell' | 'listings' | 'rank' | 'ai' | 'persona'>('wh.tab', () => 'ai');
+  const tab = tabRaw === 'persona' && !personaMode ? 'ai' : tabRaw;
+  // AI 탭 밖에 있을 때 표시: 답을 쓰는 중 / 새 답 도착
+  const [aiState, setAiState] = useState<'idle' | 'busy' | 'new'>('idle');
+  useEffect(() => {
+    if (tab === 'ai' && aiState === 'new') setAiState('idle');
+  }, [tab, aiState]);
 
   // ---------- 공통 계산 ----------
   const me = useMemo(() => makeMetricEval(data.cells), [data]);
@@ -197,9 +255,41 @@ function Explorer({ data, spread, setSpread }: { data: Bootstrap; spread: boolea
       runCustomScript(f.script, f.values).then((st) => setCustomRes((r) => ({ ...r, [k]: st })));
     }
   }, [stack]);
+  // 매물 요약 ('매물' 조건용) — 칸별로 묶어 둔다
+  const [listingIndex, setListingIndex] = useState<ListingLite[] | null>(null);
+  useEffect(() => {
+    fetch('/api/articles/index')
+      .then((r) => (r.ok ? r.json() : []))
+      .then(setListingIndex)
+      .catch(() => setListingIndex([]));
+  }, []);
+  const listingsByCell = useMemo(() => {
+    if (!listingIndex) return undefined;
+    const m = new Map<string, ListingLite[]>();
+    for (const l of listingIndex) (m.get(l.cell) ?? m.set(l.cell, []).get(l.cell)!).push(l);
+    return m;
+  }, [listingIndex]);
+  const listingOptions = useMemo(() => {
+    if (!listingIndex) return null;
+    const count = (key: (l: ListingLite) => string | null) => {
+      const m = new Map<string, number>();
+      for (const l of listingIndex) {
+        const k = key(l);
+        if (k) m.set(k, (m.get(k) ?? 0) + 1);
+      }
+      return [...m].sort((a, b) => b[1] - a[1]).map(([k]) => k);
+    };
+    const kinds = new Map<string, { cat: string; kind: string; n: number }>();
+    for (const l of listingIndex) if (l.kind) {
+      const k = `${l.cat}|${l.kind}`;
+      const e = kinds.get(k) ?? kinds.set(k, { cat: l.cat, kind: l.kind, n: 0 }).get(k)!;
+      e.n++;
+    }
+    return { cats: count((l) => l.cat), trades: count((l) => l.trade), kinds: [...kinds.values()].sort((a, b) => b.n - a.n) };
+  }, [listingIndex]);
   const fctx: FilterCtx = useMemo(
-    () => ({ me, catOf: (id) => cls.byId.get(id)?.cat ?? null, custom: (f) => customRes[customKey(f.script, f.values)] }),
-    [me, cls, customRes],
+    () => ({ me, catOf: (id) => cls.byId.get(id)?.cat ?? null, custom: (f) => customRes[customKey(f.script, f.values)], listings: listingsByCell }),
+    [me, cls, customRes, listingsByCell],
   );
   const run = useMemo(() => runFilters(stack, data.cells, fctx), [stack, data, fctx]);
   const pinIdx = pin === null ? stack.length : Math.min(pin, stack.length);
@@ -349,7 +439,79 @@ function Explorer({ data, spread, setSpread }: { data: Bootstrap; spread: boolea
     if (tourStepId !== 'newCatMap') setHiCat(null);
   }, [tourStepId]);
   const tourCell = tourStepId === 'cellSize' && tourCellId ? data.cells.find((c) => c.id === tourCellId) ?? null : null;
+  // ---------- 매물 (월세 · 전세 …) ----------
+  // 왼쪽 지도: 고른 거래유형의 칸별 매물 수 (조건 결과가 켜져 있으면 통과한 칸만)
+  const [listOn, setListOn] = usePersisted<boolean>('wh.listingsOn', () => false);
+  /** 고른 분류 (주거 · 상가 …) · 거래유형 (비면 전부) */
+  const [listCats, setListCats] = usePersisted<string[]>('wh.listingCats', () => []);
+  const [trades, setTrades] = usePersisted<string[]>('wh.listingTrades', () => []);
+  const tradeKey = `cat=${encodeURIComponent(listCats.join(','))}&trade=${encodeURIComponent(trades.join(','))}`;
+  const [listTypes, setListTypes] = useState<{ category: string; trade: string; n: number }[] | null>(null);
+  const [listCounts, setListCounts] = useState<{ key: string; v: Record<string, number> } | null>(null);
+  const [listErr, setListErr] = useState<string | null>(null);
+  const getJson = (url: string) => fetch(url).then(async (r) => (r.ok ? r.json() : Promise.reject(new Error((await r.json()).error))));
+  useEffect(() => {
+    if (!listOn || listTypes) return;
+    getJson('/api/articles/types')
+      .then((v) => (setListTypes(v), setListErr(null)))
+      .catch((e) => setListErr(e.message));
+  }, [listOn]);
+  useEffect(() => {
+    if (!listOn || listCounts?.key === tradeKey) return;
+    getJson(`/api/articles/counts?${tradeKey}`)
+      .then((v) => (setListCounts({ key: tradeKey, v }), setListErr(null)))
+      .catch((e) => setListErr(e.message));
+  }, [listOn, tradeKey]);
+  const layersWithListings: MapLayers = useMemo(() => {
+    const counts = listCounts?.v;
+    if (!listOn || !counts || !bounds) return baseLayers;
+    const shown = data.cells.filter(
+      (c) =>
+        counts[c.id] &&
+        (!filterActive || pass.has(c.id)) &&
+        c.center.lat >= bounds.minLat &&
+        c.center.lat <= bounds.maxLat &&
+        c.center.lng >= bounds.minLng &&
+        c.center.lng <= bounds.maxLng,
+    );
+    // 칸이 화면에서 몇 px 인지에 따라 k×k 칸씩 묶는다 — 숫자 사이 간격이 늘 비슷하게 (축소해도 다닥다닥 붙지 않게)
+    const cellPx = CELL_M / mPerPx;
+    // 칸이 60px 이상이면 칸마다, 아니면 묶음 사이가 화면에서 84px 이상 되도록 2·4·8… 칸씩
+    let k = 1;
+    if (cellPx < 60) while (k * cellPx < 84 && k < 64) k *= 2;
+    const groups = new Map<string, Cell[]>();
+    for (const c of shown) {
+      const [i, j] = c.id.slice(2).split('_').map(Number);
+      const key = `${Math.floor(i / k)}_${Math.floor(j / k)}`;
+      (groups.get(key) ?? groups.set(key, []).get(key)!).push(c);
+    }
+    const markers = [...groups].map(([key, cs]) => {
+      const n = cs.reduce((a, c) => a + counts[c.id], 0);
+      if (k === 1) {
+        // 칸 하나: 왼쪽 위 모서리 안쪽에 붙는 태그
+        const c = cs[0];
+        const [sw, se, , nw] = c.corners;
+        const pos = { lat: nw.lat - (nw.lat - sw.lat) * 0.16, lng: nw.lng + (se.lng - sw.lng) * 0.2 };
+        return { id: `l-${c.id}`, pos, kind: 'listing' as const, text: String(n), active: c.id === selectedId, onClick: () => selectCell(c.id) };
+      }
+      // 여러 칸 묶음: 매물 수로 가중한 가운데, 누르면 그 묶음으로 확대
+      const pos = {
+        lat: cs.reduce((a, c) => a + c.center.lat * counts[c.id], 0) / n,
+        lng: cs.reduce((a, c) => a + c.center.lng * counts[c.id], 0) / n,
+      };
+      return {
+        id: `lg${k}-${key}`,
+        pos,
+        kind: 'listingGroup' as const,
+        text: String(n),
+        onClick: () => setFocus({ key: `lg-${key}-${Date.now()}`, points: cs.flatMap((c) => c.corners) }),
+      };
+    });
+    return { ...baseLayers, markers: [...baseLayers.markers, ...markers] };
+  }, [baseLayers, listOn, listCounts, mPerPx, bounds, filterActive, pass, data, selectedId]);
+
   const layers: MapLayers = useMemo(() => {
+    const baseLayers = layersWithListings;
     if (!tourCell) return baseLayers;
     const [sw, se, ne, nw] = tourCell.corners; // 남서 · 남동 · 북동 · 북서
     const mid = (a: LatLng, b: LatLng) => ({ lat: (a.lat + b.lat) / 2, lng: (a.lng + b.lng) / 2 });
@@ -379,7 +541,7 @@ function Explorer({ data, spread, setSpread }: { data: Bootstrap; spread: boolea
       lines: [...baseLayers.lines, edge('s', sw, se), edge('e', se, ne), edge('n', ne, nw), edge('w', nw, sw), ...w.lines, ...h.lines],
       markers: [...baseLayers.markers, w.label, h.label],
     };
-  }, [baseLayers, tourCell]);
+  }, [layersWithListings, tourCell]);
 
   const fit: FitRequest = useMemo(
     () => focus ?? { key: `init-${fitRun}`, points: data.cells.flatMap((x) => x.corners), allowCrop: 0.1 },
@@ -448,8 +610,8 @@ function Explorer({ data, spread, setSpread }: { data: Bootstrap; spread: boolea
     setTourDone(true);
   };
   useEffect(() => {
-    if (!tourDone) startTour(); // 처음 접속하면 자동으로
-    else if (tourBackup.current) endTour(); // 튜토리얼 도중 새로고침했으면 쓰던 상태로
+    // 튜토리얼은 ? 버튼으로만 (첫 화면은 AI 안내). 도중에 새로고침했으면 쓰던 상태로
+    if (tourBackup.current) endTour();
   }, []);
   // 단계마다 '해 볼 것' 이 실제로 됐는지 지금 상태로 확인
   const popFilter = stack.find((f) => f.type === 'cell' && f.pred.kind === 'metric' && f.pred.cond.src === 'pop');
@@ -747,6 +909,26 @@ function Explorer({ data, spread, setSpread }: { data: Bootstrap; spread: boolea
   ];
 
   // ---------- 오른쪽 확대 지도: 선택한 구역 테두리만, 그 구역에 맞춰 확대 (색에 가리지 않은 원래 지도) ----------
+  const [cellArticles, setCellArticles] = useState<{ key: string; list: Article[] } | null>(null);
+  const [articlePick, setArticlePick] = useState<string | null>(null);
+  /** 오른쪽 지도 묶음 핀을 눌렀을 때: 그 위치의 매물만 목록에 */
+  const [pickIds, setPickIds] = useState<string[] | null>(null);
+  useEffect(() => {
+    setArticlePick(null);
+    setPickIds(null);
+    if (!selected) return setCellArticles(null);
+    const key = `${selected.id}|${tradeKey}`;
+    let alive = true;
+    fetch(`/api/articles?cell=${selected.id}&${tradeKey}`)
+      .then((r) => (r.ok ? r.json() : []))
+      .then((list: Article[]) => alive && setCellArticles({ key, list }))
+      .catch(() => alive && setCellArticles(null));
+    return () => {
+      alive = false;
+    };
+  }, [selected?.id, tradeKey]);
+  const cellList = useMemo(() => (cellArticles && cellArticles.key === `${selected?.id}|${tradeKey}` ? cellArticles.list : []), [cellArticles, selected?.id, tradeKey]);
+
   const detailLayers: MapLayers = useMemo(() => {
     if (!selected) return { polygons: [], circles: [], lines: [], markers: [] };
     const cat = catById.get(cls.byId.get(selected.id)?.cat ?? '');
@@ -754,9 +936,26 @@ function Explorer({ data, spread, setSpread }: { data: Bootstrap; spread: boolea
       polygons: [{ id: 'sel', paths: [selected.corners], stroke: cat?.color ?? '#0b0f17', strokeWeight: 4, strokeOpacity: 1, fill: '#ffffff', fillOpacity: 0 }],
       circles: [],
       lines: [],
-      markers: [],
+      markers:
+        // 같은 위치(건물)의 매물은 핀 하나로: '1,000/70 +3'
+            clusterNear(cellList, 30).map((g) => {
+              const ids = g.map((a) => a.id);
+              const on = g.length === 1 ? g[0].id === articlePick : !!pickIds && pickIds.length === ids.length && ids.every((id) => pickIds.includes(id));
+              return {
+                id: `art-${ids[0]}`,
+                pos: { lat: g.reduce((a, x) => a + x.lat!, 0) / g.length, lng: g.reduce((a, x) => a + x.lng!, 0) / g.length },
+                kind: 'home' as const,
+                text: g.length > 1 ? `${g.length}건` : articlePin(g[0]),
+                active: on,
+                onClick: () => {
+                  if (g.length === 1) (setPickIds(null), setArticlePick(on ? null : ids[0]));
+                  else (setArticlePick(null), setPickIds(on ? null : ids));
+                  setTab('listings');
+                },
+              };
+            }),
     };
-  }, [selected, cls, catById]);
+  }, [selected, cls, catById, cellList, articlePick, pickIds]);
   const detailFit: FitRequest | null = useMemo(() => (selected ? { key: `d-${selected.id}`, points: selected.corners } : null), [selected]);
   const useKakao = hasKakaoKey && !mapError;
 
@@ -776,7 +975,7 @@ function Explorer({ data, spread, setSpread }: { data: Bootstrap; spread: boolea
         <header className="panel-head">
           <div className="brand">
             <b>생활권 탐색</b>
-            <small>한성대 · 이태원역 주변</small>
+            <small>{personaMode ? '페르소나 관리' : '한성대 · 이태원역 주변'}</small>
           </div>
           <button className="icon-btn help-btn" onClick={startTour} title="사용 안내 다시 보기 (쓰던 조건은 끝나면 돌려놓아요)">
             ?
@@ -786,6 +985,16 @@ function Explorer({ data, spread, setSpread }: { data: Bootstrap; spread: boolea
           </button>
         </header>
         <nav className="tabs">
+          {personaMode && (
+            <button className={tab === 'persona' ? 'on' : ''} onClick={() => setTab('persona')}>
+              페르소나
+            </button>
+          )}
+          <button className={tab === 'ai' ? 'on' : ''} onClick={() => setTab('ai')}>
+            AI
+            {tab !== 'ai' && aiState === 'busy' && <span className="tab-dot pulse" title="답을 쓰는 중" />}
+            {tab !== 'ai' && aiState === 'new' && <span className="tab-dot" title="새 답" />}
+          </button>
           <button className={tab === 'filter' ? 'on' : ''} onClick={() => setTab('filter')}>
             조건 찾기{filterActive && <span className="tab-badge">{passList.length}</span>}
           </button>
@@ -795,8 +1004,8 @@ function Explorer({ data, spread, setSpread }: { data: Bootstrap; spread: boolea
           <button className={tab === 'cell' ? 'on' : ''} onClick={() => setTab('cell')}>
             고른 구역{selected && <span className="tab-dot" />}
           </button>
-          <button className={tab === 'ai' ? 'on' : ''} onClick={() => setTab('ai')}>
-            AI
+          <button className={tab === 'listings' ? 'on' : ''} onClick={() => setTab('listings')}>
+            매물{selected && cellList.length > 0 && <span className="tab-badge">{cellList.length}</span>}
           </button>
           {/* [임시 · 디버깅] 값이 튀는 칸 찾기 */}
           <button className={tab === 'rank' ? 'on' : ''} onClick={() => setTab('rank')}>
@@ -826,6 +1035,7 @@ function Explorer({ data, spread, setSpread }: { data: Bootstrap; spread: boolea
               selChecks={selected ? stack.map((f) => evalFilter(f, selected, fctx).ok) : null}
               selName={selected ? placeName.get(selected.id) ?? selected.dongName : ''}
               customState={(f) => customRes[customKey(f.script, f.values)]}
+              listingOptions={listingOptions}
             />
           )}
           {tab === 'type' && (
@@ -842,8 +1052,35 @@ function Explorer({ data, spread, setSpread }: { data: Bootstrap; spread: boolea
               onReset={() => setCats(defaultCategories())}
             />
           )}
-          {tab === 'ai' && (
+          {tab === 'listings' &&
+            (selected ? (
+              <div className="listings-tab">
+                <div className="listings-head">
+                  <b>{placeName.get(selected.id) ?? selected.dongName}</b>
+                  {pickIds ? (
+                    <span className="muted">
+                      이 위치 {pickIds.length}건 ·{' '}
+                      <button className="link" onClick={() => setPickIds(null)}>
+                        전체 {cellList.length}건 보기
+                      </button>
+                    </span>
+                  ) : (
+                    <span className="muted">매물 {cellList.length}건</span>
+                  )}
+                </div>
+                {!cellList.length && <div className="empty-box">이 구역에는 고른 종류의 매물이 없어요.</div>}
+                <ListingPanel inline items={pickIds ? cellList.filter((a) => pickIds.includes(a.id)) : cellList} picked={articlePick} onPick={setArticlePick} />
+              </div>
+            ) : (
+              <div className="empty-box">{gridVisible ? '지도에서 구역을 누르면 그 구역의 매물이 보여요.' : `지도를 확대해 ${CELL_SIZE}m 구역을 눌러 보세요.`}</div>
+            ))}
+          {tab === 'persona' && <PersonaSection stack={stack} setStack={setStack} cats={cats} setCats={setCats} names={names} />}
+          {/* AI 탭은 늘 살려 둔다 — 다른 탭에 가 있어도 진행 중인 답을 받는다 */}
+          <div className={`tab-pane${tab === 'ai' ? '' : ' hidden'}`}>
             <AiSection
+              visible={tab === 'ai'}
+              onActivity={setAiState}
+              dev={personaMode}
               plan={{
                 stack,
                 cats,
@@ -857,7 +1094,33 @@ function Explorer({ data, spread, setSpread }: { data: Bootstrap; spread: boolea
                       if (f.type === 'custom' && f.enabled) res[customKey(f.script, f.values)] = await runCustomScript(f.script, f.values);
                     }),
                   );
-                  return runFilters(s, data.cells, { ...fctx, custom: (f) => res[customKey(f.script, f.values)] }).final.length;
+                  const ctx = { ...fctx, custom: (f: Extract<FilterDef, { type: 'custom' }>) => res[customKey(f.script, f.values)] };
+                  const r = runFilters(s, data.cells, ctx);
+                  return {
+                    count: r.final.length,
+                    total: data.cells.length,
+                    stages: r.stages.map((x) => x.length),
+                    solo: s.map((f) => (f.enabled ? data.cells.filter((c) => evalFilter(f, c, ctx).ok).length : null)),
+                    // 이 조건 하나만 빼면 남는 칸 수
+                    without: s.map((f, i) => (f.enabled ? runFilters(s.map((g, j) => (j === i ? { ...g, enabled: false } : g)), data.cells, ctx).final.length : null)),
+                  };
+                },
+                insight: () => {
+                  if (!filterActive || passList.length >= data.cells.length) return null;
+                  const ins = computeInsight(passList, data.cells, {
+                    dests: data.meta.destinations,
+                    listings: listingsByCell,
+                    categoryOf: (id) => {
+                      const c = cls.byId.get(id)?.cat;
+                      return c ? catById.get(c)?.label ?? null : null;
+                    },
+                  });
+                  // 매물끼리 비교: 켜진 매물 조건이 있으면 그 조건 기준
+                  if (listingIndex) {
+                    const lf = stack.filter((f): f is Extract<FilterDef, { type: 'listing' }> => f.enabled && f.type === 'listing');
+                    ins.listing = computeListingInsight(new Set(passList.map((c) => c.id)), listingIndex, lf, listingMatches);
+                  }
+                  return ins;
                 },
                 apply: (s) => {
                   setStack(s);
@@ -870,7 +1133,7 @@ function Explorer({ data, spread, setSpread }: { data: Bootstrap; spread: boolea
                 setTab('filter');
               }}
             />
-          )}
+          </div>
           {tab === 'rank' && (
             <DebugRank
               spread={spread}
@@ -922,12 +1185,35 @@ function Explorer({ data, spread, setSpread }: { data: Bootstrap; spread: boolea
               동네 성격 <kbd>T</kbd>
             </button>
           )}
+          {gridVisible && (
+            <button className={listOn ? 'on' : ''} onClick={() => setListOn(!listOn)} title={listErr ?? '칸마다 매물 수 (조건 결과가 켜져 있으면 통과한 칸만)'}>
+              매물{listOn && listErr && ' ⚠'}
+            </button>
+          )}
           {stack.length > 0 && (
             <button data-tour="filters" className={filtersOn ? 'on' : ''} onClick={() => showFilters(!filtersOn)} title="필터 결과 표시 (F)">
               조건 결과 <kbd>F</kbd>
             </button>
           )}
         </div>
+        {gridVisible && listOn && !!listTypes?.length && (
+          <div className="trade-chips">
+            <ChipGroup
+              items={sumBy(listTypes, (t) => t.category)}
+              picked={listCats}
+              setPicked={setListCats}
+            />
+            <span className="chip-gap" />
+            <ChipGroup
+              items={sumBy(
+                listTypes.filter((t) => !listCats.length || listCats.includes(t.category)),
+                (t) => t.trade,
+              )}
+              picked={trades}
+              setPicked={setTrades}
+            />
+          </div>
+        )}
         {/* 범례: 지금 지도에 켜진 것을 한 곳에서 설명 */}
         {(heatInfo || filterActive || (typesOn && gridVisible)) && (
           <div className="legend-box">

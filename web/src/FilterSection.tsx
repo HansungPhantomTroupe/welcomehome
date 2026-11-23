@@ -28,6 +28,8 @@ interface Props {
   selName: string;
   /** 커스텀 조건 실행 상태 */
   customState: (f: Extract<FilterDef, { type: 'custom' }>) => CustomState | undefined;
+  /** 매물 조건에서 고를 수 있는 값 (데이터에 있는 것만) */
+  listingOptions: { cats: string[]; trades: string[]; kinds: { cat: string; kind: string }[] } | null;
 }
 
 // ---------------------------------------------------------------- 저장한 조건 묶음
@@ -62,6 +64,11 @@ const TEMPLATES: { label: string; hint: string; make: (dest: Dest) => FilterDef 
   { label: '동네 성격', hint: '조용한 주거형 · 상업·외식형 …', make: () => ({ id: nid(), enabled: true, type: 'cell', pred: { kind: 'category', ids: [] } }) },
   { label: '이동 시간', hint: '○○까지 몇 분 안에 갈 수 있는 곳', make: (dest) => ({ id: nid(), enabled: true, type: 'commute', maxMin: 20, dest }) },
   { label: '행정동', hint: '고른 동 안에서만', make: () => ({ id: nid(), enabled: true, type: 'dong', codes: [] }) },
+  {
+    label: '매물',
+    hint: '월세 · 보증금 · 원룸 · 상가 … 맞는 매물이 있는 곳',
+    make: () => ({ id: nid(), enabled: true, type: 'listing', cats: [], trades: [], kinds: [], depositMax: null, rentMax: null, areaMin: null, minCount: 1 }),
+  },
 ];
 
 
@@ -69,6 +76,7 @@ const TEMPLATES: { label: string; hint: string; make: (dest: Dest) => FilterDef 
 function kindLabel(f: FilterDef) {
   if (f.type === 'commute') return '이동 시간';
   if (f.type === 'dong') return '행정동';
+  if (f.type === 'listing') return '매물';
   if (f.type === 'custom') return `AI 조건 · ${f.script.name}`;
   if (f.pred.kind === 'category') return '동네 성격';
   const c = f.pred.cond;
@@ -419,8 +427,75 @@ export default function FilterSection(p: Props) {
   );
 }
 
+/** 비우면 null(제한 없음)인 숫자 칸 */
+function OptNum({ value, onChange }: { value: number | null; onChange: (v: number | null) => void }) {
+  return (
+    <input
+      type="number"
+      className="pill num-pill"
+      min={0}
+      value={value ?? ''}
+      placeholder="제한 없음"
+      style={{ width: '7em' }}
+      onChange={(e) => onChange(e.target.value === '' ? null : Math.max(0, Number(e.target.value)))}
+    />
+  );
+}
+
 // ---------------------------------------------------------------- 조건 문장 (문장 안에서 바로 고침)
-function FilterSentence({ f, onChange, cats, dongs, destinations, x, customState }: { f: FilterDef; onChange: (f: FilterDef) => void } & Props) {
+function FilterSentence({ f, onChange, cats, dongs, destinations, x, customState, listingOptions }: { f: FilterDef; onChange: (f: FilterDef) => void } & Props) {
+  if (f.type === 'listing') {
+    const o = listingOptions;
+    if (!o) return <div className="hint full">매물 정보를 불러오는 중이에요.</div>;
+    const toggle = (key: 'cats' | 'trades' | 'kinds', v: string) => onChange({ ...f, [key]: f[key].includes(v) ? f[key].filter((x) => x !== v) : [...f[key], v] });
+    const chips = (key: 'cats' | 'trades' | 'kinds', vals: string[]) => (
+      <div className="chips full">
+        {vals.map((v) => (
+          <button key={v} className={`chip ${f[key].includes(v) ? 'on' : ''}`} onClick={() => toggle(key, v)}>
+            {v}
+          </button>
+        ))}
+      </div>
+    );
+    const kinds = [...new Set(o.kinds.filter((k) => !f.cats.length || f.cats.includes(k.cat)).map((k) => k.kind))];
+    return (
+      <div className="full listing-cond">
+        <div className="cb-row">
+          <span className="cb-label wide">분류</span>
+          {chips('cats', o.cats)}
+        </div>
+        <div className="cb-row">
+          <span className="cb-label wide">거래</span>
+          {chips('trades', o.trades)}
+        </div>
+        <div className="cb-row">
+          <span className="cb-label wide">유형</span>
+          {chips('kinds', kinds)}
+        </div>
+        <div className="cb-row">
+          <span className="cb-label wide">월세</span>
+          <OptNum value={f.rentMax} onChange={(v) => onChange({ ...f, rentMax: v })} />
+          <span>만 원 이하</span>
+        </div>
+        <div className="cb-row">
+          <span className="cb-label wide">보증금 · 매매가</span>
+          <OptNum value={f.depositMax} onChange={(v) => onChange({ ...f, depositMax: v })} />
+          <span>만 원 이하</span>
+        </div>
+        <div className="cb-row">
+          <span className="cb-label wide">전용면적</span>
+          <OptNum value={f.areaMin} onChange={(v) => onChange({ ...f, areaMin: v })} />
+          <span>㎡ 이상</span>
+        </div>
+        <div className="cb-row">
+          <span className="cb-label wide">이런 매물이</span>
+          <NumPill value={f.minCount} min={1} onChange={(v) => onChange({ ...f, minCount: Math.max(1, v) })} />
+          <span>건 이상 있는 곳</span>
+        </div>
+        <div className="hint">비워 둔 칸은 제한 없음, 고르지 않은 칩은 전부예요.</div>
+      </div>
+    );
+  }
   if (f.type === 'custom') {
     const st = customState(f);
     return (
