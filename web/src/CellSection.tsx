@@ -3,7 +3,6 @@ import { LEVEL_LABEL } from '@shared/cellTypes';
 import type { Category } from './classify';
 import type { FilterDef } from './filters';
 import { DemoBars, KindBar, TimePattern } from './charts';
-import MonthlyPanel, { type ValueLayer } from './MonthlyPanel';
 
 interface FilterRow {
   f: FilterDef;
@@ -16,15 +15,11 @@ export default function CellSection({
   cat,
   filters,
   onClose,
-  layer,
-  setLayer,
 }: {
   cell: Cell;
   cat: Category | null;
   filters: FilterRow[];
   onClose: () => void;
-  layer: ValueLayer | null;
-  setLayer: (l: ValueLayer | null) => void;
 }) {
   const poi: [string, number][] = [
     ['음식점', cell.poi.food],
@@ -83,9 +78,6 @@ export default function CellSection({
         시간대별 유동인구 <span className="legend-wd">월~목</span> <span className="legend-we">금~일</span>
       </div>
       <TimePattern cell={cell} />
-
-      <div className="sub">월별 평균 인원 (LG U+, 2025년)</div>
-      <MonthlyPanel cellId={cell.id} layer={layer} setLayer={setLayer} />
 
       <div className="sub">인구 종류</div>
       <KindBar cell={cell} />

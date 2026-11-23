@@ -250,12 +250,6 @@ export function passes(_c: Cond, v: number, th: Th) {
   return v >= th[0] && v <= th[1];
 }
 
-/** 받은 구역마다 종류별 가장 가까운 시설까지 거리(m)를 붙인다 */
-export function withNearDist(cells: Cell[], nearest: (c: Cell['center'], key: PoiCat) => number | null) {
-  for (const cell of cells) cell.nearM = Object.fromEntries(POI_KEYS.map((k) => [k, nearest(cell.center, k) ?? Infinity]));
-  return cells;
-}
-
 // ---------------------------------------------------------------- 종류
 export interface Category {
   id: string;
@@ -266,7 +260,8 @@ export interface Category {
   conds: Cond[];
 }
 
-const PALETTE = ['#3E9B6C', '#3B7DD8', '#E9822F', '#8A5CF0', '#D8405A', '#0E9EA8', '#C29A0B', '#7A5C3E', '#E05FA8', '#5F6B7A'];
+// 기본 성격 색(초록·파랑·주황·보라·빨강·청록·회색) 다음에 쓰는 색은 그것들과 헷갈리지 않는 순서로
+const PALETTE = ['#3E9B6C', '#3B7DD8', '#E9822F', '#8A5CF0', '#D8405A', '#0E9EA8', '#EC4899', '#7A5C3E', '#1E3A8A', '#5F6B7A'];
 let seq = 0;
 export function newCategory(existing: Category[]): Category {
   const used = new Set(existing.map((c) => c.color));

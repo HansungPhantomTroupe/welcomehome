@@ -54,7 +54,8 @@ export default function CategoriesSection(p: Props) {
   const add = () => {
     const n = newCategory(p.cats);
     // 새 성격은 맨 위에 — 아래에 두면 위 성격이 구역을 먼저 가져가 0곳으로 보인다
-    p.setCats([{ ...n, conds: [newPopCond()] }, ...p.cats]);
+    // 조건은 비워 두고 사용자가 첫 조건 종류를 고른다 (조건 없으면 0곳)
+    p.setCats([n, ...p.cats]);
     setEditing(n.id);
   };
 
@@ -144,7 +145,6 @@ export default function CategoriesSection(p: Props) {
                             setCat(i, {
                               ...r,
                               match: 'all',
-                              conds: r.conds.length ? r.conds : [newPopCond()],
                             })
                           }
                         />
@@ -158,7 +158,6 @@ export default function CategoriesSection(p: Props) {
                             setCat(i, {
                               ...r,
                               match: 'any',
-                              conds: r.conds.length ? r.conds : [newPopCond()],
                             })
                           }
                         />
@@ -184,17 +183,15 @@ export default function CategoriesSection(p: Props) {
                                 conds: r.conds.map((v, m) => (m === j ? nk : v)),
                               })
                             }
-                            onRemove={
-                              r.conds.length > 1
-                                ? () =>
-                                    setCat(i, {
-                                      ...r,
-                                      conds: r.conds.filter((_, m) => m !== j),
-                                    })
-                                : undefined
+                            onRemove={() =>
+                              setCat(i, {
+                                ...r,
+                                conds: r.conds.filter((_, m) => m !== j),
+                              })
                             }
                           />
                         ))}
+                        {r.conds.length === 0 && <div className="hint">첫 조건 종류를 고르세요.</div>}
                         <span className="add-pair">
                           <button
                             className="add-line"

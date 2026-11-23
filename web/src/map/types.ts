@@ -31,8 +31,8 @@ export interface MapLine {
   zIndex?: number;
 }
 
-/** value: 칸 위에 쓰는 작은 숫자 */
-export type MarkerKind = 'dot' | 'label' | 'value';
+/** listing: 칸 모서리 매물 수 · listingGroup: 여러 칸 묶음 매물 수 · home: 매물 가격 핀 */
+export type MarkerKind = 'dot' | 'label' | 'listing' | 'listingGroup' | 'home';
 
 export interface MapMarker {
   id: string;
