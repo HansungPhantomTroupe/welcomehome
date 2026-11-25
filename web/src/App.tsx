@@ -14,7 +14,7 @@ import DebugRank from './DebugRank';
 import AiSection from './AiSection';
 import PersonaSection from './PersonaSection';
 import { computeInsight, computeListingInsight } from './insights';
-import ListingPanel, { articlePin, type Article } from './ListingPanel';
+import ListingPanel, { articlePin, articlePrice, type Article } from './ListingPanel';
 import { customKey, runCustomScript, type CustomState } from './filters';
 import Tutorial, { type TourStep } from './Tutorial';
 
@@ -1121,6 +1121,39 @@ function Explorer({ data, spread, setSpread }: { data: Bootstrap; spread: boolea
                     ins.listing = computeListingInsight(new Set(passList.map((c) => c.id)), listingIndex, lf, listingMatches);
                   }
                   return ins;
+                },
+                selected: () => {
+                  if (!selected) return null;
+                  const ins = computeInsight([selected], data.cells, {
+                    dests: data.meta.destinations,
+                    listings: listingsByCell,
+                    categoryOf: (id) => {
+                      const c = cls.byId.get(id)?.cat;
+                      return c ? catById.get(c)?.label ?? null : null;
+                    },
+                  });
+                  const cat = cls.byId.get(selected.id)?.cat;
+                  return {
+                    name: placeName.get(selected.id) ?? selected.dongName,
+                    dong: selected.dongName,
+                    category: cat ? catById.get(cat)?.label ?? null : null,
+                    passes: filterActive ? pass.has(selected.id) : null,
+                    filters: stack.filter((f) => f.enabled).map((f) => ({ text: describe(f, names), ...evalFilter(f, selected, fctx) })),
+                    rows: ins.rows,
+                    listings: cellList.map((a) =>
+                      [
+                        a.category !== '주거' ? a.category : null,
+                        articlePrice(a),
+                        a.typeName,
+                        a.areaExclusive ? `전용 ${a.areaExclusive}㎡` : null,
+                        a.floor ? `${a.floor}층` : null,
+                        a.direction,
+                        a.tags.length ? a.tags.slice(0, 8).join('/') : null,
+                      ]
+                        .filter(Boolean)
+                        .join(' · '),
+                    ),
+                  };
                 },
                 apply: (s) => {
                   setStack(s);

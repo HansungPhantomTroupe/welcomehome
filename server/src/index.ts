@@ -140,6 +140,27 @@ ai.post('/chat', wrap(async (req, res, sid) => {
                 : undefined,
           }
         : undefined,
+    selected:
+      ctx.selected && Array.isArray(ctx.selected.rows)
+        ? {
+            name: String(ctx.selected.name ?? '').slice(0, 80),
+            dong: String(ctx.selected.dong ?? '').slice(0, 40),
+            category: ctx.selected.category ? String(ctx.selected.category).slice(0, 60) : null,
+            passes: typeof ctx.selected.passes === 'boolean' ? ctx.selected.passes : null,
+            filters: (Array.isArray(ctx.selected.filters) ? ctx.selected.filters : [])
+              .slice(0, 40)
+              .filter((f: any) => f && typeof f.text === 'string')
+              .map((f: any) => ({ text: f.text.slice(0, 200), ok: !!f.ok, detail: String(f.detail ?? '').slice(0, 80) })),
+            rows: ctx.selected.rows
+              .slice(0, 150)
+              .filter((r: any) => r && typeof r.label === 'string')
+              .map((r: any) => ({ label: r.label.slice(0, 80), sel: Number(r.sel), all: Number(r.all), pct: r.pct === null ? null : Number(r.pct) })),
+            listings: (Array.isArray(ctx.selected.listings) ? ctx.selected.listings : [])
+              .slice(0, 60)
+              .filter((s: any) => typeof s === 'string')
+              .map((s: string) => s.slice(0, 200)),
+          }
+        : undefined,
   };
   res.json(
     await chat(sid, model, history, cx, {

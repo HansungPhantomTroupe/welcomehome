@@ -29,6 +29,18 @@ export interface ChatContext {
     /** 매물끼리 비교 (매물이 모자라면 없음) */
     listing?: { basis: string; selN: number; cmpN: number; rows: { label: string; sel: number; cmp: number }[] };
   };
+  /** 사용자가 지도에서 지금 고른 구역 하나 — 없으면 고른 곳 없음 */
+  selected?: {
+    name: string;
+    dong: string;
+    category: string | null;
+    /** 지금 조건을 통과하는지 (조건이 없으면 null) */
+    passes: boolean | null;
+    filters: { text: string; ok: boolean; detail: string }[];
+    rows: { label: string; sel: number; all: number; pct: number | null }[];
+    /** 이 구역 매물 한 줄 요약 (화면에서 고른 거래 종류 기준) */
+    listings: string[];
+  };
 }
 
 const EXAMPLE_CUSTOM = {
@@ -131,6 +143,18 @@ ${cx.insight.listing.rows.map((r) => `- ${r.label}: 걸러진 쪽 ${r.sel} / 비
       : ''
   }
 
+[지금 고른 구역]
+${
+    cx.selected
+      ? `사용자가 지도에서 고른 200m 칸 하나: ${cx.selected.name} (${cx.selected.dong})${cx.selected.category ? ` · 동네 성격 "${cx.selected.category}"` : ''}
+${cx.selected.passes === null ? '조건 없음' : cx.selected.passes ? '지금 조건을 모두 통과하는 칸' : '지금 조건에서 걸러진 칸'}
+${cx.selected.filters.map((f) => `- 조건 "${f.text}": ${f.ok ? '통과' : '탈락'}${f.detail ? ` (${f.detail})` : ''}`).join('\n')}
+지표 (이 칸 값 / 전체 칸 중간값, 위치 = 이 칸 값이 전체 ${cx.insight?.total ?? ''}칸 중 몇 % 위치인지. 범주 지표는 해당하면 100%):
+${cx.selected.rows.map((r) => `- ${r.label}: 이 칸 ${r.sel} / 전체 ${r.all}${r.pct === null ? '' : ` (위치 ${r.pct}%)`}`).join('\n')}
+이 칸 매물 ${cx.selected.listings.length}건${cx.selected.listings.length ? ':\n' + cx.selected.listings.map((s) => `- ${s}`).join('\n') : ''}`
+      : '(고른 구역 없음)'
+  }
+
 ${
     personas
       ? `[다른 사용자 사례]
@@ -165,6 +189,7 @@ ${personas}`
 - 데이터로 판단할 수 없는 요청(치안, 집값, 소음 측정 등)은 그렇다고 말하고, 가까운 대리 지표를 쓸지 제안한다. 대리 지표를 쓰면 description 이나 설명에 밝힌다.
 - 요청이 모호하면 json 없이 짧게 되묻는다.
 - 사용자가 지금 결과의 매물이 왜 싸거나 비싼지, 어떤 매물인지 물으면 [지금 결과의 매물 비교]를 근거로 답한다. 면적·㎡당 월세·층(지하·1층)·연식·방 개수·관리비·설비·유형 차이 중 큰 것부터, 걸러진 쪽과 비교군 숫자를 함께. 매물 수가 적으면 그렇다고 밝힌다.
+- 사용자가 "여기·이 구역·고른 곳"처럼 지도에서 고른 칸을 물으면 [지금 고른 구역]을 근거로 답한다. 전체 칸과 비교해 뚜렷한 지표, 조건 통과·탈락 이유, 매물(가격·면적·층)을 숫자와 함께. 고른 구역이 없으면 지도에서 구역을 먼저 눌러 달라고 한다.
 - 사용자가 지금 결과(남은 구역)의 공통점·특징을 물으면 [지금 결과의 특징]을 근거로 답한다. 조건으로 이미 건 것과 그 조건에서 당연히 따라 나오는 것은 빼고, 뚜렷한 것 3~5개를 숫자와 함께 짧게. 표에 없는 것은 추측하지 않는다. json 목록은 내지 않고, 마지막에 그중 조건으로 추가할 만한 것을 한 줄로 제안한다.
 - "[실행 결과]" 로 시작하는 메시지는 서버가 네 목록을 확인한 결과다. 지적한 항목을 고쳐 목록 전체를 다시 낸다.`;
 }

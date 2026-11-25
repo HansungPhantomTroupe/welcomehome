@@ -169,6 +169,16 @@ export interface PlanCtx {
   evaluate: (s: FilterDef[]) => Promise<Evaluation>;
   /** 지금 걸러진 칸들 vs 전체 비교 (조건이 없거나 전부 통과면 null) */
   insight: () => Insight | null;
+  /** 지금 고른 구역 하나의 지표(전체 칸 중 위치) · 조건 통과 여부 · 매물 (고른 구역이 없으면 null) */
+  selected: () => {
+    name: string;
+    dong: string;
+    category: string | null;
+    passes: boolean | null;
+    filters: { text: string; ok: boolean; detail: string }[];
+    rows: Insight['rows'];
+    listings: string[];
+  } | null;
   apply: (s: FilterDef[]) => void;
 }
 
@@ -234,6 +244,7 @@ function Chat({
         stack: plan.stack.map((f) => toItem(f, describe(f, plan.names))),
         categories: plan.cats.filter((c) => c.enabled).map((c) => ({ id: c.id, label: c.label, desc: catDesc(c) })),
         insight: plan.insight(),
+        selected: plan.selected(),
       };
       // 추천한 목록이 0곳이면 이유(조건별 칸 수)를 AI 에게 알려 다시 짜게 한다
       let hist = history;
